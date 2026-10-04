@@ -1,0 +1,24 @@
+SainsMasemba Patch v2.1.4
+
+Fitur:
+1. Tambah tipe soal MATCHING / Menjodohkan.
+2. Template import soal berisi 4 contoh: SINGLE_CHOICE, MULTIPLE_CHOICE, TRUE_FALSE, MATCHING.
+3. Tambah menu Pengembang dengan dua profil dan foto kecil.
+
+Cara memasang frontend:
+- Copy seluruh isi folder patch ke root repository SainsMasemba.
+- Replace file yang sama.
+- Push ke GitHub / redeploy Vercel.
+
+Cara memasang Apps Script:
+- Ganti Admin.gs, Exam.gs, Config.gs dengan versi patch.
+- Jalankan repairSainsMasemba() agar kolom interactionDataJson otomatis ditambahkan ke QUESTIONS tanpa menghapus data.
+- Deploy > Manage deployments > Edit > New version > Deploy.
+- URL /exec tetap sama.
+
+Import MATCHING:
+matching_left  : Hukum I Newton|Hukum II Newton|Hukum III Newton
+matching_right : F = ma|Aksi dan reaksi sama besar berlawanan arah|Benda mempertahankan keadaan geraknya
+kunci_jawaban : 1:3|2:1|3:2
+
+Tiga format lama tetap kompatibel.

@@ -1,0 +1,5 @@
+<svg width="980" height="280" viewBox="0 0 980 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0B5DB4"/><stop offset="1" stop-color="#11B8B8"/></linearGradient></defs>
+<g transform="translate(28 20) scale(0.47)"><rect width="512" height="512" rx="100" fill="#EFF8FF"/><circle cx="256" cy="256" r="190" stroke="url(#g)" stroke-width="18"/><path d="M120 320c48-18 92-18 136 6 44-24 88-24 136-6V190c-48-18-92-18-136 6-44-24-88-24-136-6v130Z" fill="none" stroke="#0B5DB4" stroke-width="18" stroke-linejoin="round"/><path d="M256 196v130M190 133c38 25 94 25 132 0M190 379c38-25 94-25 132 0" stroke="#11B8B8" stroke-width="16" stroke-linecap="round"/><circle cx="256" cy="105" r="13" fill="#FFB020"/></g>
+<text x="310" y="112" font-family="Inter,Arial,sans-serif" font-size="68" font-weight="900" fill="#0B5DB4">SuKa</text><text x="310" y="184" font-family="Inter,Arial,sans-serif" font-size="44" font-weight="800" fill="#11B8B8">Olimpiade</text><text x="310" y="232" font-family="Inter,Arial,sans-serif" font-size="36" font-weight="700" fill="#334155">Fisika</text>
+</svg>

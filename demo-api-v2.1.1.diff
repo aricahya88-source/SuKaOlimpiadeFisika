@@ -1,0 +1,56 @@
+--- a/src/lib/api/demo-api.ts
++++ b/src/lib/api/demo-api.ts
+@@ -11,6 +11,7 @@
+ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+ const uid = (prefix: string) => `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+ const parseCsvLine=(line:string)=>{const out:string[]=[];let cur='',quoted=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'){if(quoted&&line[i+1]==='"'){cur+='"';i++;}else quoted=!quoted;}else if(ch===','&&!quoted){out.push(cur);cur='';}else cur+=ch;}out.push(cur);return out;};
++const plainText=(html:string)=>html.replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
+ 
+ type Manager = Extract<User['role'], 'super_admin' | 'teacher'>;
+ interface DemoAttemptState {
+@@ -72,12 +73,43 @@
+   async getDashboardStats(token:string):Promise<DashboardStats>{await delay();const u=userFromToken(token);requireManager(u);const exams=visibleExams(u);const ids=new Set(exams.map((e)=>e.examId));const attempts=store.attempts.filter((a)=>ids.has(a.examId));const now=Date.now();return{activeExams:exams.filter((e)=>new Date(e.startTime).getTime()<=now&&new Date(e.endTime).getTime()>=now).length,upcomingExams:exams.filter((e)=>new Date(e.startTime).getTime()>now).length,students:store.students.length,inProgress:attempts.filter((a)=>a.status==='IN_PROGRESS').length,submitted:attempts.filter((a)=>a.status==='SUBMITTED').length,notSubmitted:Math.max(0,store.students.length-attempts.filter((a)=>a.status==='SUBMITTED').length)};}
+   async listExams(token:string){await delay();const u=userFromToken(token);requireManager(u);return clone(visibleExams(u));}
+   async saveExam(token:string,input:AdminExamInput){await delay();const u=userFromToken(token);requireManager(u);const id=input.examId||uid('EX');const existing=store.exams.find((e)=>e.examId===id);if(existing&&!canManageExam(u,id))throw new Error('Ujian milik guru lain.');let ownerId=u.role==='teacher'?u.userId:(input.ownerId||existing?.ownerId||store.teachers[0]?.userId||'');const record:ExamRecord={...input,examId:id,ownerId,ownerName:teacherName(ownerId),tokenRequired:Boolean(input.token)};const idx=store.exams.findIndex((e)=>e.examId===id);if(idx>=0)store.exams[idx]=record;else store.exams.unshift(record);persist();return clone(record);}
+-  async deleteExam(token:string,examId:string){await delay();const u=userFromToken(token);requireManager(u);if(!canManageExam(u,examId))throw new Error('Tidak diizinkan.');store.exams=store.exams.filter((e)=>e.examId!==examId);store.questions=store.questions.filter((q)=>q.examId!==examId);persist();}
++  async deleteExam(token:string,examId:string){await delay();const u=userFromToken(token);requireManager(u);if(!canManageExam(u,examId))throw new Error('Tidak diizinkan.');store.exams=store.exams.filter((e)=>e.examId!==examId);delete store.examMappings[examId];store.questions=store.questions.map((q)=>q.examId===examId?{...q,examId:undefined}:q);persist();}
+   async duplicateExam(token:string,examId:string){await delay();const u=userFromToken(token);requireManager(u);if(!canManageExam(u,examId))throw new Error('Tidak diizinkan.');const src=store.exams.find((e)=>e.examId===examId)!;const newId=uid('EX');const copy:ExamRecord={...clone(src),examId:newId,title:`${src.title} (Salinan)`,status:'DRAFT',ownerId:u.role==='teacher'?u.userId:src.ownerId,ownerName:u.role==='teacher'?u.name:src.ownerName};store.exams.unshift(copy);store.examMappings[newId]=[...(store.examMappings[examId]||[])];persist();return clone(copy);}
+   async getExamQuestionIds(token:string,examId:string){await delay();const u=userFromToken(token);requireManager(u);if(!canManageExam(u,examId))throw new Error('Tidak diizinkan.');return clone(store.examMappings[examId]||[]);}
+   async saveExamQuestions(token:string,examId:string,questionIds:string[]){await delay();const u=userFromToken(token);requireManager(u);if(!canManageExam(u,examId))throw new Error('Tidak diizinkan.');const allowed=new Set(store.questions.filter((q)=>u.role==='super_admin'||q.authorId===u.userId).map((q)=>q.questionId));const ids=[...new Set(questionIds)].filter((id)=>allowed.has(id));store.examMappings[examId]=ids;const ex=store.exams.find((e)=>e.examId===examId);if(ex)ex.questionCount=ids.length;persist();return{questionCount:ids.length};}
+   async listQuestions(token:string,examId?:string){await delay();const u=userFromToken(token);requireManager(u);let rows=store.questions.filter((q)=>u.role==='super_admin'||q.authorId===u.userId||(!q.authorId&&q.examId&&canManageExam(u,q.examId)));if(examId){const mapped=new Set(store.examMappings[examId]||[]);rows=rows.filter((q)=>mapped.has(q.questionId));}return clone(rows);}
+-  async saveQuestion(token:string,input:AdminQuestionInput){await delay();const u=userFromToken(token);requireManager(u);const id=input.questionId||uid('Q');const existing=store.questions.find((q)=>q.questionId===id);if(existing&&u.role!=='super_admin'&&existing.authorId!==u.userId)throw new Error('Soal milik pengguna lain.');const record:QuestionRecord={...input,questionId:id,authorId:existing?.authorId||u.userId,authorName:existing?.authorName||u.name,examId:existing?.examId||''};const idx=store.questions.findIndex((q)=>q.questionId===id);if(idx>=0)store.questions[idx]=record;else store.questions.unshift(record);if(input.examId){const mapped=store.examMappings[input.examId]||[];if(!mapped.includes(id))store.examMappings[input.examId]=[...mapped,id];}persist();return clone(record);}
++  async saveQuestion(token:string,input:AdminQuestionInput){
++    await delay();
++    const u=userFromToken(token);
++    requireManager(u);
++    const id=input.questionId||uid('Q');
++    const existing=store.questions.find((q)=>q.questionId===id);
++    if(existing&&u.role!=='super_admin'&&existing.authorId!==u.userId)throw new Error('Soal milik pengguna lain.');
++
++    // AdminQuestionInput.questionText is intentionally optional because imports may
++    // provide rich HTML only. QuestionRecord, however, always exposes plain text to
++    // the exam engine, so normalize it here instead of spreading `undefined` into
++    // a required property.
++    const questionText=(input.questionText||plainText(input.questionHtml||'')).trim();
++    const questionHtml=(input.questionHtml||input.questionText||'').trim();
++    const record:QuestionRecord={
++      ...input,
++      questionId:id,
++      authorId:existing?.authorId||u.userId,
++      authorName:existing?.authorName||u.name,
++      examId:existing?.examId||undefined,
++      questionText,
++      questionHtml,
++    };
++    const idx=store.questions.findIndex((q)=>q.questionId===id);
++    if(idx>=0)store.questions[idx]=record;else store.questions.unshift(record);
++    if(input.examId){
++      const mapped=store.examMappings[input.examId]||[];
++      if(!mapped.includes(id))store.examMappings[input.examId]=[...mapped,id];
++    }
++    persist();
++    return clone(record);
++  }
+   async deleteQuestion(token:string,questionId:string){await delay();const u=userFromToken(token);requireManager(u);const q=store.questions.find((x)=>x.questionId===questionId);if(!q||(u.role!=='super_admin'&&q.authorId!==u.userId))throw new Error('Tidak diizinkan.');store.questions=store.questions.filter((x)=>x.questionId!==questionId);Object.keys(store.examMappings).forEach((id)=>store.examMappings[id]=store.examMappings[id].filter((qid)=>qid!==questionId));persist();}
+   async importQuestionsCsv(token:string,csvText:string){await delay();const u=userFromToken(token);requireManager(u);const lines=csvText.trim().split(/\r?\n/),headers=parseCsvLine(lines.shift()||'').map((x)=>x.trim()),errors:string[]=[];let imported=0;for(let i=0;i<lines.length;i++){if(!lines[i].trim())continue;const vals=parseCsvLine(lines[i]).map((v)=>v.trim());const row=Object.fromEntries(headers.map((h,j)=>[h,vals[j]||'']));try{if(row.examId&&!canManageExam(u,row.examId))throw new Error('ujian tujuan tidak diizinkan');await this.saveQuestion(token,{examId:row.examId||undefined,code:row.code||'',stimulusOrder:Number(row.stimulusOrder||1),topicCode:row.topicCode||'',blueprintCode:row.blueprintCode||'',questionText:row.questionText||row.questionHtml||'',questionHtml:row.questionHtml||row.questionText||'',explanation:row.explanation||'',optionA:row.optionA||'',optionB:row.optionB||'',optionC:row.optionC||'',optionD:row.optionD||'',optionE:row.optionE||'',correctAnswers:row.correctAnswers||row.correctAnswer||'',score:Number(row.score||row.maxScore||1),maxScore:Number(row.maxScore||row.score||1),questionType:(row.questionType||'SINGLE_CHOICE') as QuestionRecord['questionType'],scoringMode:(row.scoringMode||'EXACT_MATCH') as QuestionRecord['scoringMode'],difficulty:row.difficulty||'Sedang',tag:row.tag||'',status:(row.status||'DRAFT') as QuestionRecord['status']});imported++;}catch(error){errors.push(`Baris ${i+2}: ${error instanceof Error?error.message:'gagal'}`);}}persist();return{imported,errors};}
+   async uploadQuestionImage(token:string,file:{name:string;mimeType:string;base64:string}):Promise<UploadImageResponse>{await delay();const u=userFromToken(token);requireManager(u);return{fileId:uid('FILE'),imageUrl:`data:${file.mimeType};base64,${file.base64}`,name:file.name};}
