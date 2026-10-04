@@ -1,0 +1,1 @@
+'use client'; import { AuthGuard } from '@/components/auth-guard'; import { AdminShell } from '@/components/admin-shell'; import { QuestionManager } from '@/components/question-manager'; export default function Page(){return <AuthGuard role="teacher"><AdminShell><QuestionManager/></AdminShell></AuthGuard>}
