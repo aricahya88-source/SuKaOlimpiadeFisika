@@ -1,0 +1,16 @@
+BEGIN;
+CREATE TABLE IF NOT EXISTS suka_users(id text PRIMARY KEY, username text NOT NULL, password_hash text NOT NULL, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX IF NOT EXISTS suka_username_unique ON suka_users(lower(username));
+CREATE TABLE IF NOT EXISTS suka_sessions(token_hash text PRIMARY KEY, user_id text NOT NULL REFERENCES suka_users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL);
+CREATE INDEX IF NOT EXISTS suka_sessions_expiry ON suka_sessions(expires_at);
+CREATE TABLE IF NOT EXISTS suka_exams(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS suka_questions(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS suka_attempts(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS suka_attempt_student_exam ON suka_attempts((data->>'studentId'),(data->>'examId'));
+CREATE TABLE IF NOT EXISTS suka_submissions(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS suka_submission_attempt ON suka_submissions((data->>'attemptId'));
+CREATE TABLE IF NOT EXISTS suka_exam_mappings(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS suka_validations(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS suka_assignments(id text PRIMARY KEY, data jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS suka_login_limits(id text PRIMARY KEY, failures integer NOT NULL DEFAULT 0, window_start timestamptz NOT NULL DEFAULT now());
+COMMIT;
