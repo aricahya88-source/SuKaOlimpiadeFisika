@@ -57,7 +57,7 @@ export async function execute(action:string,args:any[],source:string,db=database
   assert(args[1]&&typeof args[1]==='object'&&!Array.isArray(args[1]),'Data tidak valid.');const i=args[1];delete i.passwordHash;
   for(const k of ['questionHtml','questionText','optionA','optionB','optionC','optionD','optionE','explanation','descriptionHtml','rulesHtml','instructions'])if(k in i)i[k]=clean(i[k]);
   if(i.interactionData)for(const side of ['left','right']){assert(Array.isArray(i.interactionData[side])&&i.interactionData[side].length<=5,'Pasangan maksimum 5 item.');for(const item of i.interactionData[side])item.text=clean(item.text);}
-  if(['saveStudent','saveTeacher','saveUser'].includes(action)){const old=(await c.query('SELECT data FROM suka_users WHERE id=$1',[i.userId||''])).rows[0]?.data;if(action==='saveStudent')assert(!old||old.role==='student','Akun bukan peserta.');if(action==='saveTeacher')assert(!old||old.role==='teacher','Akun bukan panitia.');if(action==='saveUser')assert(!old||old.role===i.role,'Perubahan peran akun harus membuat akun baru.');}
+  if(['saveStudent','saveTeacher','saveUser'].includes(action)){const old=(await c.query('SELECT data FROM suka_users WHERE id=$1',[i.userId||''])).rows[0]?.data;if(action==='saveStudent')assert(!old||old.role==='student','Akun bukan peserta.');if(action==='saveTeacher')assert(!old||old.role==='teacher','Akun bukan panitia.');if(action==='saveUser'&&old&&old.role!==i.role){assert(user.role==='super_admin','Hanya Super Admin dapat mengubah role.');assert(old.userId!==user.userId,'Role akun sendiri tidak dapat diubah.');}}
   if(action==='saveExam'){assert(Number.isFinite(i.durationMinutes)&&i.durationMinutes>0&&Date.parse(i.endTime)>Date.parse(i.startTime),'Durasi/jadwal tidak valid.');}
   if(action==='saveQuestion'){
    assert(['SINGLE_CHOICE','MULTIPLE_CHOICE','TRUE_FALSE','MATCHING'].includes(i.questionType)&&['EXACT_MATCH','PARTIAL_NO_PENALTY'].includes(i.scoringMode)&&['DRAFT','REVIEW','PUBLISHED','ARCHIVED'].includes(i.status),'Tipe/status soal tidak valid.');assert(Number.isFinite(i.maxScore)&&i.maxScore>0&&i.correctAnswers,'Bobot/kunci jawaban wajib diisi.');
@@ -75,7 +75,21 @@ export async function execute(action:string,args:any[],source:string,db=database
  if(action==='listUsers'){assert(user.role==='super_admin','Hanya Super Admin.');result=(await c.query('SELECT data FROM suka_users')).rows.map(r=>r.data);}
  else if(action==='listAssignments'&&user.role==='validator')result=store.questions.map(q=>({assignmentId:'summary-'+q.questionId,questionId:q.questionId,validatorId:user.userId,validatorName:user.name,status:store.validations[q.questionId]?.status||'PENDING',questionText:q.questionText}));
  else if(action==='getDashboardStats'&&user.role==='validator')result={activeExams:0,upcomingExams:0,students:0,inProgress:store.questions.filter(q=>!store.validations[q.questionId]||store.validations[q.questionId].status!=='APPROVED').length,submitted:Object.values(store.validations).filter(v=>v.status==='APPROVED').length,notSubmitted:0};
- else if(action==='saveUser'&&args[1].role==='super_admin'){assert(user.role==='super_admin','Hanya Super Admin.');const i=args[1];result={userId:i.userId||'SA-'+randomBytes(12).toString('hex'),name:i.name,username:i.username,email:i.email,role:'super_admin',status:i.status};}
+ else if(action==='saveUser'){
+  assert(user.role==='super_admin','Hanya Super Admin.');const i=args[1];
+  assert(['super_admin','teacher','validator','student'].includes(i.role),'Role tidak valid.');
+  if(i.role==='student')assert(i.className?.trim(),'Kelas peserta wajib diisi.');
+  if(['teacher','validator'].includes(i.role))assert(i.subject?.trim(),'Mata pelajaran wajib diisi.');
+  const old=(await c.query('SELECT data FROM suka_users WHERE id=$1',[i.userId||''])).rows[0]?.data;
+  if(old?.role==='super_admin'&&(i.role!=='super_admin'||i.status!=='ACTIVE')){
+   const active=(await c.query("SELECT id FROM suka_users WHERE data->>'role'='super_admin' AND data->>'status'='ACTIVE'")).rows;
+   assert(active.some(u=>u.id!==old.userId),'Harus ada minimal satu Super Admin aktif.');
+  }
+  result={userId:i.userId||'U-'+randomBytes(12).toString('hex'),name:i.name,username:i.username,email:i.email,phone:i.phone,role:i.role,status:i.status,...(i.role==='student'?{className:i.className}:{}),...(['teacher','validator'].includes(i.role)?{subject:i.subject}:{})};
+  store.students=store.students.filter(u=>u.userId!==result.userId);store.teachers=store.teachers.filter(u=>u.userId!==result.userId);store.validators=store.validators.filter(u=>u.userId!==result.userId);
+  if(i.role==='student')store.students.push(result);if(i.role==='teacher')store.teachers.push(result);if(i.role==='validator')store.validators.push(result);
+  if(old&&old.role!==i.role)await c.query('DELETE FROM suka_sessions WHERE user_id=$1',[result.userId]);
+ }
  else if(action==='uploadQuestionImage'){
   assert(user.role!=='student','Tidak diizinkan.');const file=args[1];assert(file&&['image/png','image/jpeg','image/webp','image/gif'].includes(file.mimeType),'Gunakan PNG, JPG, WebP atau GIF.');assert(typeof file.base64==='string'&&file.base64.length<1400000,'Gambar maksimal 1 MB.');result={fileId:'IMG-'+randomBytes(12).toString('hex'),imageUrl:`data:${file.mimeType};base64,${file.base64}`,name:String(file.name||'image')};
  }else {

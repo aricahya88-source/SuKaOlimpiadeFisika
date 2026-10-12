@@ -1,0 +1,1 @@
+Ekstrak dan timpa tiga file pada root repository aplikasi versi Neon. Commit/push, tunggu Netlify deploy selesai. Tidak perlu SQL baru atau membuat ulang akun. Perubahan role mencabut sesi akun; pengguna perlu login ulang. Password lama tetap digunakan jika password baru kosong. Role akun sendiri tidak dapat diubah.
