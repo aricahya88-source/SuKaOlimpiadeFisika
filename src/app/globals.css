@@ -200,3 +200,5 @@
 .user-role-grid .role-option strong{display:block;font-size:.95rem;line-height:1.35}
 .user-role-grid .role-option small{display:block;font-size:.8rem;line-height:1.5;color:#64748b;overflow-wrap:anywhere}
 @media(max-width:600px){.user-role-grid{grid-template-columns:1fr}}
+
+.validator-answer-review{padding:20px;margin-top:18px}.validator-answer-review h3{margin:0 0 12px}.validator-answer-review h3:not(:first-child){margin-top:24px}.validator-matching-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}.validator-matching-columns h4{margin:0 0 12px}.validator-matching-item,.validator-key-options>div{display:flex;gap:12px;align-items:flex-start;padding:12px;border:1px solid #dbe3ed;border-radius:10px;margin-bottom:8px}.validator-key-options>div>b{flex-shrink:0;color:#166534}.validator-key-code{color:#64748b;font-size:.85rem}.validator-answer-review td{vertical-align:top;min-width:180px}.validator-answer-review .reading-content,.validator-matching-item .reading-content{min-width:0;overflow-wrap:anywhere}@media(max-width:650px){.validator-matching-columns{grid-template-columns:1fr}}
