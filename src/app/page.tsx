@@ -55,7 +55,7 @@ export default function LoginPage() {
           <label>Password<div className="password-field"><input type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" required/><button type="button" onClick={() => setShowPassword((v) => !v)} aria-label={showPassword ? 'Sembunyikan password' : 'Tampilkan password'}>{showPassword ? <EyeOff size={20}/> : <Eye size={20}/>}</button></div></label>
           {error && <div className="form-error">{error}</div>}
           <button className="button primary full" disabled={submitting}>{submitting ? <><LoaderCircle className="spin" size={19}/>Memverifikasi...</> : <>Masuk<ArrowRight size={19}/></>}</button>
-          {process.env.NEXT_PUBLIC_API_MODE !== 'apps-script' && (
+          {!['apps-script','neon'].includes(process.env.NEXT_PUBLIC_API_MODE || 'demo') && (
             <div className="demo-hint"><CheckCircle2 size={18}/><div><strong>Mode demo aktif</strong><span>Super Admin: superadmin / super123<br/>Panitia: panitia / panitia123<br/>Validator: validator / validator123<br/>Peserta: peserta / peserta123</span><div className="demo-actions"><button type="button" onClick={() => { setUsername('peserta'); setPassword('peserta123'); }}>Peserta</button><button type="button" onClick={() => { setUsername('panitia'); setPassword('panitia123'); }}>Panitia</button><button type="button" onClick={() => { setUsername('validator'); setPassword('validator123'); }}>Validator</button><button type="button" onClick={() => { setUsername('superadmin'); setPassword('super123'); }}>Super Admin</button></div></div></div>
           )}
         </form>

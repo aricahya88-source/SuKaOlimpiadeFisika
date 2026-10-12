@@ -51,7 +51,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
       </aside>
       {open && <button aria-label="Tutup menu" className="sidebar-backdrop" onClick={() => setOpen(false)} />}
       <section className="admin-main">
-        <header className="admin-topbar"><button className="icon-button mobile-only" onClick={() => setOpen(true)}><Menu size={22}/></button><div><strong>SuKa Olimpiade Fisika</strong><span>{isSuper ? 'Panel Super Admin' : isValidator ? 'Panel Validator' : 'Panel Panitia'}</span></div><div className="topbar-spacer"/><span className="api-mode"><BookOpenCheck size={14}/>{process.env.NEXT_PUBLIC_API_MODE === 'apps-script' ? 'Production' : 'Demo Mode'}</span></header>
+        <header className="admin-topbar"><button className="icon-button mobile-only" onClick={() => setOpen(true)}><Menu size={22}/></button><div><strong>SuKa Olimpiade Fisika</strong><span>{isSuper ? 'Panel Super Admin' : isValidator ? 'Panel Validator' : 'Panel Panitia'}</span></div><div className="topbar-spacer"/><span className="api-mode"><BookOpenCheck size={14}/>{['apps-script','neon'].includes(process.env.NEXT_PUBLIC_API_MODE || 'demo') ? 'Production' : 'Demo Mode'}</span></header>
         <main className="admin-content">{children}</main>
       </section>
     </div>
