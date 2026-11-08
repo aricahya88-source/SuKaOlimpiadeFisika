@@ -9,16 +9,16 @@ import { StudentShell } from '@/components/student-shell';
 import { Badge, EmptyState, Skeleton } from '@/components/ui';
 import { useSession } from '@/contexts/session-context';
 import { getExamApi, type ExamSummary } from '@/lib/api';
+import { isExamActiveForStudent, isExamUpcoming } from '@/lib/exam-availability';
 import { formatDateTime, formatDuration } from '@/lib/format';
 
-function statusFor(exam: ExamSummary) {
+function statusFor(exam: ExamSummary, nowMs: number) {
   if (exam.attemptStatus === 'SUBMITTED') return { label: 'Selesai', tone: 'success' as const };
   if (exam.attemptStatus === 'IN_PROGRESS') return { label: 'Sedang dikerjakan', tone: 'warning' as const };
   if (exam.attemptStatus === 'PAUSED') return { label: 'Dijeda panitia', tone: 'warning' as const };
-  const now = Date.now();
-  if (new Date(exam.startTime).getTime() > now) return { label: 'Akan datang', tone: 'neutral' as const };
-  if (new Date(exam.endTime).getTime() < now) return { label: 'Ditutup', tone: 'danger' as const };
-  return { label: 'Tersedia', tone: 'primary' as const };
+  if (isExamUpcoming(exam, nowMs)) return { label: 'Akan datang', tone: 'neutral' as const };
+  if (new Date(exam.endTime).getTime() <= nowMs) return { label: 'Ditutup', tone: 'danger' as const };
+  return { label: 'Sedang berlangsung', tone: 'primary' as const };
 }
 
 export default function StudentHome() {
@@ -26,14 +26,58 @@ export default function StudentHome() {
   const [exams, setExams] = useState<ExamSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Update the availability at the exact start/end boundary without waiting
+  // for a backend request or requiring students to refresh the page.
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!session) return;
-    getExamApi().getAvailableExams(session.token).then(setExams).catch((e) => setError(e instanceof Error ? e.message : 'Gagal memuat ujian.')).finally(() => setLoading(false));
+    let cancelled = false;
+    let requestInFlight = false;
+    setExams([]);
+    setError('');
+    setLoading(true);
+
+    const load = async () => {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const next = await getExamApi().getAvailableExams(session.token);
+        if (!cancelled) { setExams(next); setError(''); }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Gagal memuat ujian.');
+      } finally {
+        requestInFlight = false;
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+
+    void load();
+    // Pick up new schedules and administrator changes while the page stays open.
+    const poll = window.setInterval(refreshWhenVisible, 60_000);
+    window.addEventListener('focus', refreshWhenVisible);
+    window.addEventListener('online', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(poll);
+      window.removeEventListener('focus', refreshWhenVisible);
+      window.removeEventListener('online', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
   }, [session]);
 
-  const active = useMemo(() => exams.filter((exam) => ['IN_PROGRESS', 'PAUSED'].includes(String(exam.attemptStatus || '')) || (exam.availableNow && exam.attemptStatus !== 'SUBMITTED')), [exams]);
-  const upcoming = useMemo(() => exams.filter((exam) => new Date(exam.startTime).getTime() > Date.now()), [exams]);
+  const active = useMemo(() => exams.filter((exam) => isExamActiveForStudent(exam, nowMs)), [exams, nowMs]);
+  const upcoming = useMemo(() => exams.filter((exam) => !exam.attemptStatus && isExamUpcoming(exam, nowMs)), [exams, nowMs]);
   const completed = exams.filter((exam) => exam.attemptStatus === 'SUBMITTED').length;
 
   return (
@@ -52,9 +96,10 @@ export default function StudentHome() {
 
       <section className="section-block">
         <div className="section-title"><div><span className="eyebrow">UJIAN</span><h2>Tersedia untuk Anda</h2></div></div>
-        {loading ? <><Skeleton height={180}/><Skeleton height={180}/></> : error ? <div className="notice danger">{error}</div> : active.length === 0 ? <EmptyState title="Belum ada ujian aktif" description="Ujian yang dapat dikerjakan akan muncul di sini."/> : (
+        {error && <div className="notice danger">{error}</div>}
+        {loading ? <><Skeleton height={180}/><Skeleton height={180}/></> : active.length === 0 ? <EmptyState title="Belum ada ujian aktif" description="Ujian yang dapat dikerjakan akan muncul di sini."/> : (
           <div className="exam-card-list">{active.map((exam) => {
-            const status = statusFor(exam);
+            const status = statusFor(exam, nowMs);
             return <article className="exam-card" key={exam.examId}>
               <div className="exam-card-top"><span className="subject-icon"><FileText size={22}/></span><Badge tone={status.tone}>{status.label}</Badge></div>
               <div><p className="exam-subject">{exam.subject} • {exam.className}</p><h3>{exam.title}</h3></div>
