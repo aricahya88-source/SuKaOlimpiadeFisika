@@ -5,7 +5,7 @@ export type MonitoringStatus = 'NOT_STARTED' | AttemptStatus;
 export type ResultVisibility = 'immediate' | 'after_exam_closed' | 'manual_publish' | 'hidden';
 export type SaveStatus = 'synced' | 'syncing' | 'offline' | 'error' | 'local-only';
 export type QuestionType = 'SINGLE_CHOICE' | 'MULTIPLE_CHOICE' | 'TRUE_FALSE' | 'MATCHING';
-export type ScoringMode = 'EXACT_MATCH' | 'PARTIAL_NO_PENALTY';
+export type ScoringMode = 'EXACT_MATCH' | 'PARTIAL_CORRECTED' | 'PARTIAL_NO_PENALTY';
 export type QuestionStatus = 'DRAFT' | 'REVIEW' | 'PUBLISHED' | 'ARCHIVED';
 
 export interface MatchingItem { id: string; text: string; }

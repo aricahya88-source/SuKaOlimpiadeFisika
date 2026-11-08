@@ -1,5 +1,6 @@
 import { isSimulationUrlAllowed } from '@/lib/simulation';
 import { isExamStartableNow, isExamVisibleToStudents } from '@/lib/exam-availability';
+import { gradeQuestion } from '@/lib/grading';
 import { demoExams, demoQuestions, demoStudents, demoTeachers } from '@/lib/demo-data';
 import type { ExamApi } from './exam-api';
 import type {
@@ -76,7 +77,42 @@ export class DemoExamApi implements ExamApi {
   async resumeAttempt(token:string,attemptId:string,offset=0,limit=10):Promise<ResumeAttemptResponse>{await delay();const u=userFromToken(token);const a=store.attempts.find((x)=>x.attemptId===attemptId&&x.studentId===u.userId);if(!a)throw new Error('Attempt tidak ditemukan.');const exam=store.exams.find((e)=>e.examId===a.examId)!;return{attempt:{attemptId:a.attemptId,examId:a.examId,studentId:a.studentId,startedAt:a.startedAt,expiresAt:a.expiresAt,serverTime:new Date().toISOString(),revision:a.revision,status:a.status,questionCount:a.questionOrder.length,batchSize:limit,exam},answers:clone(a.answers),questions:attemptQuestions(a,offset,limit),offset,hasMore:offset+limit<a.questionOrder.length};}
   async getQuestionsBatch(token:string,attemptId:string,offset:number,limit:number){await delay();const u=userFromToken(token);const a=store.attempts.find((x)=>x.attemptId===attemptId&&x.studentId===u.userId);if(!a)throw new Error('Attempt tidak ditemukan.');return{questions:attemptQuestions(a,offset,limit),offset,hasMore:offset+limit<a.questionOrder.length};}
   async saveAnswers(token:string,attemptId:string,revision:number,answers:Record<string,string>):Promise<SaveAnswersResponse>{await delay(90);const u=userFromToken(token);const a=store.attempts.find((x)=>x.attemptId===attemptId&&x.studentId===u.userId);if(!a||a.status!=='IN_PROGRESS')throw new Error('Attempt tidak aktif.');a.answers={...a.answers,...answers};a.revision=Math.max(a.revision+1,revision);persist();return{attemptId,revision:a.revision,lastSyncAt:new Date().toISOString()};}
-  async submitExam(token:string,input:{attemptId:string;submissionId:string;revision:number;answers:Record<string,string>}):Promise<SubmitResponse>{await delay(250);const u=userFromToken(token);const a=store.attempts.find((x)=>x.attemptId===input.attemptId&&x.studentId===u.userId);if(!a)throw new Error('Attempt tidak ditemukan.');const existing=store.submissions.find((s)=>s.attemptId===a.attemptId);if(existing)return{submissionId:existing.submissionId,attemptId:a.attemptId,accepted:true,alreadySubmitted:true,submittedAt:existing.submittedAt,result:await this.getResult(token,a.attemptId)};a.answers={...a.answers,...input.answers};let correct=0,wrong=0,blank=0,points=0,max=0;a.questionOrder.forEach((id)=>{const q=store.questions.find((x)=>x.questionId===id);if(!q)return;const weight=Number(q.maxScore||q.score||1);max+=weight;if(q.questionType==='MATCHING'){const expected=parseMatchingKey(String(q.correctAnswers||q.correctAnswer||''));const answerMap=parseMatchingAnswer(String(a.answers[id]||''));const leftItems=parseInteractionData((q as any).interactionData)?.left||[];const answeredValues=Object.values(answerMap).filter(Boolean);if(!answeredValues.length){blank++;return;}const total=Math.max(Object.keys(expected).length,leftItems.length,1);const hits=Object.keys(expected).filter((leftId)=>answerMap[leftId]===expected[leftId]).length;const exact=hits===Object.keys(expected).length&&Object.keys(answerMap).length>=Object.keys(expected).length; if(exact){correct++;points+=weight;return;} wrong++; if(q.scoringMode==='PARTIAL_NO_PENALTY'&&total){points+=weight*(hits/total);} return;} const ans=String(a.answers[id]||'').split(',').map(x=>x.trim().toUpperCase()).filter(Boolean);const key=String(q.correctAnswers||q.correctAnswer||'').split(',').map(x=>x.trim().toUpperCase()).filter(Boolean);if(!ans.length){blank++;return;}const exact=ans.length===key.length&&(q.questionType==='TRUE_FALSE'?ans.join('|')===key.join('|'):[...ans].sort().join('|')===[...key].sort().join('|'));if(exact){correct++;points+=weight;return;}wrong++;if(q.scoringMode==='PARTIAL_NO_PENALTY'&&key.length){const hits=q.questionType==='TRUE_FALSE'?key.filter((value,index)=>ans[index]===value).length:ans.filter(x=>key.includes(x)).length;points+=weight*(hits/key.length);}});const score=max?Math.round(points/max*10000)/100:0;const submittedAt=new Date().toISOString();const exam=store.exams.find((e)=>e.examId===a.examId)!;store.submissions.push({submissionId:input.submissionId,attemptId:a.attemptId,studentId:u.userId,studentName:u.name,className:u.className||'-',examId:a.examId,examTitle:exam.title,score,correctCount:correct,wrongCount:wrong,blankCount:blank,submittedAt});a.status='SUBMITTED';a.submittedAt=submittedAt;persist();return{submissionId:input.submissionId,attemptId:a.attemptId,accepted:true,submittedAt,result:await this.getResult(token,a.attemptId)};}
+  async submitExam(token: string, input: { attemptId: string; submissionId: string; revision: number; answers: Record<string, string> }): Promise<SubmitResponse> {
+    await delay(250);
+    const user = userFromToken(token);
+    const attempt = store.attempts.find((row) => row.attemptId === input.attemptId && row.studentId === user.userId);
+    if (!attempt) throw new Error('Attempt tidak ditemukan.');
+    const existing = store.submissions.find((row) => row.attemptId === attempt.attemptId);
+    if (existing) {
+      return { submissionId: existing.submissionId, attemptId: attempt.attemptId, accepted: true,
+        alreadySubmitted: true, submittedAt: existing.submittedAt, result: await this.getResult(token, attempt.attemptId) };
+    }
+    attempt.answers = { ...attempt.answers, ...input.answers };
+    let correct = 0, wrong = 0, blank = 0, points = 0, max = 0;
+    attempt.questionOrder.forEach((id) => {
+      const question = store.questions.find((row) => row.questionId === id);
+      if (!question) return;
+      const grade = gradeQuestion(question, attempt.answers[id]);
+      max += grade.max;
+      points += grade.points;
+      if (grade.blank) blank++;
+      else if (grade.correct) correct++;
+      else wrong++;
+    });
+    const score = max ? Math.round(points / max * 10000) / 100 : 0;
+    const submittedAt = new Date().toISOString();
+    const exam = store.exams.find((row) => row.examId === attempt.examId)!;
+    store.submissions.push({
+      submissionId: input.submissionId, attemptId: attempt.attemptId, studentId: user.userId,
+      studentName: user.name, className: user.className || '-', examId: attempt.examId,
+      examTitle: exam.title, score, correctCount: correct, wrongCount: wrong, blankCount: blank, submittedAt,
+    });
+    attempt.status = 'SUBMITTED';
+    attempt.submittedAt = submittedAt;
+    persist();
+    return { submissionId: input.submissionId, attemptId: attempt.attemptId,
+      accepted: true, submittedAt, result: await this.getResult(token, attempt.attemptId) };
+  }
   async getResult(token:string,attemptId:string):Promise<ExamResult|null>{await delay(60);const u=userFromToken(token);const a=store.attempts.find((x)=>x.attemptId===attemptId);if(!a)return null;const exam=store.exams.find((e)=>e.examId===a.examId)!;const allowed=u.role==='student'?a.studentId===u.userId:(u.role==='super_admin'||exam.ownerId===u.userId);if(!allowed)return null;const sub=store.submissions.find((s)=>s.attemptId===attemptId);if(!sub)return null;const visible=u.role!=='student'||exam.resultVisibility==='immediate'||(exam.resultVisibility==='after_exam_closed'&&Date.now()>new Date(exam.endTime).getTime());return{examId:exam.examId,attemptId,title:exam.title,subject:exam.subject,score:sub.score,correctCount:sub.correctCount,wrongCount:sub.wrongCount,blankCount:sub.blankCount,questionCount:sub.correctCount+sub.wrongCount+sub.blankCount,submittedAt:sub.submittedAt,visible};}
   async getMyResults(token:string){const u=userFromToken(token);const results=await Promise.all(store.attempts.filter((a)=>a.studentId===u.userId&&a.status==='SUBMITTED').map((a)=>this.getResult(token,a.attemptId)));return results.filter(Boolean) as ExamResult[];}
   async getDashboardStats(token:string):Promise<DashboardStats>{await delay();const u=userFromToken(token);requireManager(u);const exams=visibleExams(u);const ids=new Set(exams.map((e)=>e.examId));const attempts=store.attempts.filter((a)=>ids.has(a.examId));const now=Date.now();return{activeExams:exams.filter((e)=>new Date(e.startTime).getTime()<=now&&new Date(e.endTime).getTime()>=now).length,upcomingExams:exams.filter((e)=>new Date(e.startTime).getTime()>now).length,students:store.students.length,inProgress:attempts.filter((a)=>a.status==='IN_PROGRESS').length,submitted:attempts.filter((a)=>a.status==='SUBMITTED').length,notSubmitted:Math.max(0,store.students.length-attempts.filter((a)=>a.status==='SUBMITTED').length)};}

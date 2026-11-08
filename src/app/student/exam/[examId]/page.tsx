@@ -14,6 +14,7 @@ import { useSession } from '@/contexts/session-context';
 import { getExamApi, type Attempt, type ExamResult, type ExamSummary, type PreflightResult, type Question, type SaveStatus } from '@/lib/api';
 import { checkStorageReadiness, deleteLocalAttempt, findLocalAttemptByExam, saveLocalAttempt } from '@/lib/exam-store';
 import { formatBytes, formatCountdown, formatDateTime, formatDuration } from '@/lib/format';
+import { isExamSimulationIframeFocused, shouldRecordExamFocusExit } from '@/lib/exam-focus';
 
 type Phase = 'loading' | 'preflight' | 'starting' | 'exam' | 'review' | 'submitting' | 'submitted' | 'error';
 type ExamFontSize = 'small' | 'medium' | 'large';
@@ -52,6 +53,7 @@ export default function ExamPage() {
   const lastTeacherWarningRef = useRef('');
   const pendingFocusViolations = useRef(0);
   const fullscreenExpected = useRef(false);
+  const simulationFullscreenActive = useRef(false);
   const lastFocusEventAt = useRef(0);
   const syncInFlight = useRef(false);
   const prefetchInFlight = useRef(false);
@@ -151,6 +153,7 @@ export default function ExamPage() {
   useEffect(() => {
     if (phase !== 'exam' && phase !== 'review') return;
     document.body.classList.add('exam-session-active');
+    let pendingBlurCheck: number | undefined;
     const onOnline = () => syncAnswers(true);
     const registerFocusExit = () => {
       const now = Date.now();
@@ -169,7 +172,12 @@ export default function ExamPage() {
       }
     };
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') registerFocusExit();
+      if (document.visibilityState === 'hidden') {
+        // Visibility takes precedence over the iframe exception: changing tabs
+        // is a real focus violation even if the last focused element was the simulation.
+        if (pendingBlurCheck !== undefined) window.clearTimeout(pendingBlurCheck);
+        registerFocusExit();
+      }
       else if (pendingFocusViolations.current > 0 && session && attempt?.attemptId) {
         const count = pendingFocusViolations.current;
         pendingFocusViolations.current = 0;
@@ -178,8 +186,30 @@ export default function ExamPage() {
           .catch(() => { pendingFocusViolations.current += count; });
       }
     };
-    const onWindowBlur = () => registerFocusExit();
+    const onWindowBlur = () => {
+      if (pendingBlurCheck !== undefined) window.clearTimeout(pendingBlurCheck);
+      // Browsers dispatch window.blur when a cross-origin iframe is clicked.
+      // Wait briefly for activeElement to settle before deciding.
+      pendingBlurCheck = window.setTimeout(() => {
+        pendingBlurCheck = undefined;
+        const hidden = document.visibilityState === 'hidden';
+        const insideSimulation = isExamSimulationIframeFocused(document.activeElement);
+        if (shouldRecordExamFocusExit('blur', hidden, insideSimulation)) registerFocusExit();
+      }, 50);
+    };
     const onFullscreenChange = () => {
+      const simulationFullscreen = isExamSimulationIframeFocused(document.fullscreenElement);
+      if (simulationFullscreen) {
+        simulationFullscreenActive.current = true;
+        return;
+      }
+      if (simulationFullscreenActive.current) {
+        simulationFullscreenActive.current = false;
+        // Closing a simulator's own fullscreen is not an attempt to exit the exam.
+        // Keep the guard active; browser permissions may require the user to
+        // re-enter fullscreen using the ordinary exam controls.
+        return;
+      }
       if (fullscreenExpected.current && !document.fullscreenElement && document.visibilityState === 'visible') {
         setSecurityNotice('Mode layar penuh dinonaktifkan. Kembali ke mode layar penuh untuk melanjutkan ujian.');
         registerFocusExit();
@@ -217,6 +247,7 @@ export default function ExamPage() {
     document.addEventListener('contextmenu', blockContextMenu);
     document.addEventListener('dragstart', blockDrag);
     return () => {
+      if (pendingBlurCheck !== undefined) window.clearTimeout(pendingBlurCheck);
       document.body.classList.remove('exam-session-active');
       window.removeEventListener('online', onOnline);
       window.removeEventListener('blur', onWindowBlur);

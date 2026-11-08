@@ -59,7 +59,16 @@ const normalizeType = (value: unknown): QuestionType => {
   const v = String(value || 'SINGLE_CHOICE').trim().toUpperCase();
   return ['SINGLE_CHOICE', 'MULTIPLE_CHOICE', 'TRUE_FALSE', 'MATCHING'].includes(v) ? (v as QuestionType) : 'SINGLE_CHOICE';
 };
-const normalizeScoring = (value: unknown): ScoringMode => String(value || 'EXACT_MATCH').trim().toUpperCase() === 'PARTIAL_NO_PENALTY' ? 'PARTIAL_NO_PENALTY' : 'EXACT_MATCH';
+const normalizeScoring = (value: unknown, type: QuestionType): ScoringMode => {
+  const scoring = String(value || 'EXACT_MATCH').trim().toUpperCase();
+  if (type === 'MULTIPLE_CHOICE') {
+    return ['PARTIAL_CORRECTED', 'PARTIAL_NO_PENALTY'].includes(scoring) ? 'PARTIAL_CORRECTED' : 'EXACT_MATCH';
+  }
+  if (type === 'TRUE_FALSE' || type === 'MATCHING') {
+    return scoring === 'PARTIAL_NO_PENALTY' ? 'PARTIAL_NO_PENALTY' : 'EXACT_MATCH';
+  }
+  return 'EXACT_MATCH';
+};
 const normalizeStatus = (value: unknown): QuestionStatus => {
   const v = String(value || 'DRAFT').trim().toUpperCase();
   return ['DRAFT', 'REVIEW', 'PUBLISHED', 'ARCHIVED'].includes(v) ? v as QuestionStatus : 'DRAFT';
@@ -144,7 +153,7 @@ export function QuestionManager() {
       topicCode: q.topicCode || '',
       blueprintCode: q.blueprintCode || '',
       questionType: q.questionType || 'SINGLE_CHOICE',
-      scoringMode: q.scoringMode || 'EXACT_MATCH',
+      scoringMode: normalizeScoring(q.scoringMode, q.questionType || 'SINGLE_CHOICE'),
       difficulty: q.difficulty,
       tag: q.tag,
       category: q.category || '',
@@ -225,7 +234,7 @@ export function QuestionManager() {
       let valid = 0;
       rows.forEach((row, index) => {
         const type = normalizeType(excelValue(row, 'jenis_soal', 'questionType'));
-        const scoring = normalizeScoring(excelValue(row, 'sistem_penilaian', 'scoringMode'));
+        const scoring = normalizeScoring(excelValue(row, 'sistem_penilaian', 'scoringMode'), type);
         const stimulus = String(excelValue(row, 'stimulus_html'));
         const prompt = String(excelValue(row, 'pertanyaan_html', 'questionHtml', 'questionText'));
         const questionHtml = [stimulus, prompt].filter(Boolean).join('\n');
@@ -313,7 +322,7 @@ export function QuestionManager() {
     ...form,
     questionType: t,
     correctAnswers: t === 'TRUE_FALSE' ? 'B,B,B,B' : t === 'MULTIPLE_CHOICE' ? 'A,C' : t === 'MATCHING' ? '1:1|2:2' : 'A',
-    scoringMode: t === 'SINGLE_CHOICE' ? 'EXACT_MATCH' : form.scoringMode,
+    scoringMode: 'EXACT_MATCH',
     interactionData: t === 'MATCHING' ? (form.interactionData || { left: [{ id: 'L1', text: '' }, { id: 'L2', text: '' }], right: [{ id: 'R1', text: '' }, { id: 'R2', text: '' }] }) : form.interactionData,
   });
 
@@ -334,7 +343,22 @@ export function QuestionManager() {
     {loading ? <Skeleton height={340} /> : <section className="panel"><div className="table-wrap"><table><thead><tr><th>Kode</th><th>Soal</th><th>Jenis</th><th>Kesulitan</th><th>Status</th><th>Kunci</th><th></th></tr></thead><tbody>{paged.map(q => <tr key={q.questionId}><td><strong>{q.code || '-'}</strong><small>No. {q.stimulusOrder || 1}</small></td><td className="question-html-cell"><MathHtml html={q.questionHtml || q.questionText} className="reading-content" /><small>{q.authorName || 'Bank soal'} • {q.tag || q.topicCode || 'Tanpa tag'}</small></td><td><span className="type-pill">{q.questionType}</span></td><td>{q.difficulty}</td><td><span className={`badge status-${String(q.status).toLowerCase()}`}>{q.status}</span></td><td><span className="key-pill">{formatKeyDisplay(q)}</span></td><td><div className="row-actions"><button onClick={() => edit(q)}>Edit</button><button className="danger" onClick={() => remove(q.questionId)}><Trash2 /></button></div></td></tr>)}</tbody></table></div>{filtered.length > pageSize && <div className="manager-pagination"><span>Halaman {page} dari {pages}</span><div className="manager-pagination-actions"><button className="button secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}><ChevronLeft size={16} /></button><button className="button secondary" disabled={page >= pages} onClick={() => setPage(p => p + 1)}><ChevronRight size={16} /></button></div></div>}</section>}
     <Modal open={open} onClose={() => setOpen(false)} title={form.questionId ? 'Edit soal' : 'Tambah soal'} size="large"><form className="form-grid" onSubmit={save}>
       <label>Tambahkan langsung ke ujian (opsional)<select value={form.examId || ''} onChange={e => setForm({ ...form, examId: e.target.value || undefined })}><option value="">Simpan ke bank soal saja</option>{exams.map(e => <option key={e.examId} value={e.examId}>{e.title}</option>)}</select></label><label>Kode soal<input value={form.code || ''} onChange={e => setForm({ ...form, code: e.target.value })} placeholder="FIS-001" /></label>
-      <label>Jenis soal<select value={form.questionType} onChange={e => setType(e.target.value as QuestionType)}><option value="SINGLE_CHOICE">Pilihan ganda biasa</option><option value="MULTIPLE_CHOICE">Pilihan ganda kompleks</option><option value="TRUE_FALSE">Benar atau salah</option><option value="MATCHING">Menjodohkan</option></select></label><label>Sistem penilaian<select value={form.scoringMode} onChange={e => setForm({ ...form, scoringMode: e.target.value as ScoringMode })}><option value="EXACT_MATCH">Exact match</option><option value="PARTIAL_NO_PENALTY">Parsial tanpa penalti</option></select></label>
+      <label>Jenis soal<select value={form.questionType} onChange={e => setType(e.target.value as QuestionType)}><option value="SINGLE_CHOICE">Pilihan ganda biasa</option><option value="MULTIPLE_CHOICE">Pilihan ganda kompleks</option><option value="TRUE_FALSE">Benar atau salah</option><option value="MATCHING">Menjodohkan</option></select></label>
+      <label>Sistem penilaian
+        <select value={form.scoringMode} disabled={form.questionType === 'SINGLE_CHOICE'} onChange={e => setForm({ ...form, scoringMode: e.target.value as ScoringMode })}>
+          <option value="EXACT_MATCH">Ketat — seluruh jawaban harus tepat (resmi)</option>
+          {form.questionType === 'MULTIPLE_CHOICE'
+            ? <option value="PARTIAL_CORRECTED">Parsial terkoreksi — poin opsi salah dikurangi</option>
+            : form.questionType !== 'SINGLE_CHOICE'
+              ? <option value="PARTIAL_NO_PENALTY">Parsial per pernyataan/pasangan (latihan)</option>
+              : null}
+        </select>
+      </label>
+      {form.questionType === 'MULTIPLE_CHOICE' && <div className="span-2 notice neutral">
+        <strong>Standar Olimpiade: penilaian ketat.</strong> Jawaban harus persis sama dengan kunci untuk memperoleh poin.
+        Untuk latihan, panitia dapat memilih <strong>parsial terkoreksi</strong>: opsi benar yang dipilih menambah poin,
+        opsi salah yang dipilih mengurangi poin; memilih semua opsi tidak memberikan keuntungan.
+      </div>}
       <label>Kategori soal<input value={form.category || ''} onChange={e => setForm({ ...form, category: e.target.value })} placeholder="Ulangan Harian / PTS / PAS / Tryout" /></label><label>Nama paket soal<input value={form.packageName || ''} onChange={e => setForm({ ...form, packageName: e.target.value })} placeholder="Soal Ulangan Harian 2" /></label>
       <label>Kesulitan<select value={form.difficulty} onChange={e => setForm({ ...form, difficulty: e.target.value })}><option>Mudah</option><option>Sedang</option><option>Sulit</option></select></label><label>Status<select value={form.status} onChange={e => setForm({ ...form, status: e.target.value as QuestionStatus })}><option>DRAFT</option><option>REVIEW</option><option>PUBLISHED</option><option>ARCHIVED</option></select></label>
       <label>Urutan / stimulus<input type="number" min="1" value={form.stimulusOrder || 1} onChange={e => setForm({ ...form, stimulusOrder: Number(e.target.value) })} /></label><label>Bobot soal<input type="number" min="0.1" step="0.1" value={form.maxScore} onChange={e => setForm({ ...form, maxScore: Number(e.target.value), score: Number(e.target.value) })} /></label><label>Tag / topik<input value={form.tag} onChange={e => setForm({ ...form, tag: e.target.value })} /></label><label>Kode topik<input value={form.topicCode || ''} onChange={e => setForm({ ...form, topicCode: e.target.value })} placeholder="FISIKA-GERAK" /></label><label className="span-2">Kode kisi-kisi / blueprint (opsional)<input value={form.blueprintCode || ''} onChange={e => setForm({ ...form, blueprintCode: e.target.value })} placeholder="IPA-SMP-GERAK-001" /></label>
