@@ -5,6 +5,9 @@ import {database} from './db';import {digest,hashPassword,checkPassword} from '.
 import {createExamEngine} from './engine';import {loadStore,saveStore,stateUsers} from './store';
 import type {User} from '../api/types';
 const allowed=new Set(['login','logout','getSession','getAvailableExams','startExam','resumeAttempt','getQuestionsBatch','saveAnswers','submitExam','getResult','getMyResults','getDashboardStats','listExams','saveExam','deleteExam','duplicateExam','getExamQuestionIds','saveExamQuestions','listQuestionPackages','applyQuestionPackage','listQuestions','validateQuestion','listValidators','listAssignments','saveAssignments','saveQuestion','deleteQuestion','importQuestionsCsv','uploadQuestionImage','listStudents','saveStudent','deleteStudent','importStudents','listUsers','saveUser','deleteUser','listTeachers','saveTeacher','deleteTeacher','getMonitoring','setAttemptPaused','warnAttempt','resetAttempt','getAttemptControl','reportFocusViolation','getAdminResults']);
+// Queries used by students/admins must never queue behind every exam write.
+// They are read-only: skipping saveStore also prevents a stale read from writing back.
+const readOnly=new Set(['getSession','getAvailableExams','resumeAttempt','getQuestionsBatch','getResult','getMyResults','getDashboardStats','listExams','getExamQuestionIds','listQuestionPackages','listQuestions','listValidators','listAssignments','listStudents','listUsers','listTeachers','getMonitoring','getAttemptControl','getAdminResults']);
 function assert(ok:unknown,msg:string):asserts ok{if(!ok)throw new Error(msg);}
 const clean=(html:unknown)=>sanitizeHtml(String(html||''),{allowedTags:sanitizeHtml.defaults.allowedTags.concat(['img','span','sub','sup']),allowedAttributes:{'*':['class','style'],img:['src','alt','width','height']},allowedSchemes:['https','http','data'],allowedStyles:{'*':{'text-align':[/^(left|right|center|justify)$/],'font-size':[/^\d+(px|em|rem|%)$/],color:[/^#[0-9a-f]+$/i]}}});
 const publicExam=(x:any)=>{const {token,...rest}=x;return {...rest,tokenRequired:!!token};};
@@ -13,7 +16,11 @@ export async function execute(action:string,args:any[],source:string,db=database
  assert(allowed.has(action),'Aksi tidak dikenal.');assert(Array.isArray(args)&&args.length<=6,'Parameter tidak valid.');
  const c=await db.connect();
  try{
- await c.query('BEGIN');await c.query("SET LOCAL statement_timeout='20s'");await c.query('SELECT pg_advisory_xact_lock(731045)');
+ await c.query('BEGIN');await c.query("SET LOCAL statement_timeout='20s'");
+ // Login has its own per-username row for rate limiting. Exam starts use a
+ // student+exam lock below. All remaining mutations retain the global lock,
+ // preserving the existing read/modify/write consistency guarantees.
+ if(action!=='login'&&action!=='startExam'&&!readOnly.has(action))await c.query('SELECT pg_advisory_xact_lock(731045)');
  if(action==='login'){
   const [name,password]=args;assert(typeof name==='string'&&name.length<120,'Username tidak valid.');const key=digest(source+':'+name.toLowerCase());
   await c.query("INSERT INTO suka_login_limits(id) VALUES($1) ON CONFLICT DO NOTHING",[key]);
@@ -28,6 +35,9 @@ export async function execute(action:string,args:any[],source:string,db=database
  }
  const token=args[0];assert(typeof token==='string'&&/^[a-f0-9]{64}$/.test(token),'Sesi tidak valid. Silakan login kembali.');
  const sr=await c.query('SELECT u.data,s.expires_at FROM suka_sessions s JOIN suka_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now()',[digest(token)]);assert(sr.rows[0]?.data.status==='ACTIVE','Sesi telah berakhir. Silakan login kembali.');const user:User=sr.rows[0].data;
+ // Different students can start concurrently. Repeat clicks for the same
+ // student/exam remain serialized, avoiding duplicate attempts.
+ if(action==='startExam')await c.query('SELECT pg_advisory_xact_lock(731046, hashtext($1::text))',[`${user.userId}:${String(args[1])}`]);
  if(action==='logout'){await c.query('DELETE FROM suka_sessions WHERE token_hash=$1',[digest(token)]);await c.query('COMMIT');return null;}
  if(action==='getSession'){await c.query('COMMIT');return {token,user,expiresAt:sr.rows[0].expires_at.toISOString()};}
  const store=await loadStore(c),before=structuredClone(store);const engine:any=createExamEngine(store,user);
@@ -101,7 +111,7 @@ export async function execute(action:string,args:any[],source:string,db=database
  if(['saveStudent','saveTeacher','saveUser'].includes(action))await persistUser(c,result,args[1].password);
  if(action==='importStudents')for(const u of stateUsers(store)){if(!before.students.some(b=>b.userId===u.userId)||before.students.some(b=>b.userId===u.userId&&JSON.stringify(b)!==JSON.stringify(u))){const row=args[1].find((r:any)=>String(r.username).toLowerCase()===u.username.toLowerCase());await persistUser(c,u,row?.password||args[2]);}}
  if(['deleteStudent','deleteTeacher','deleteUser'].includes(action))await c.query('DELETE FROM suka_users WHERE id=$1',[args[1]]);
- await saveStore(c,before,store);
+ if(!readOnly.has(action))await saveStore(c,before,store);
  if(action==='getAvailableExams')result=result.map((e:any)=>{const r=publicExam(e);delete r.score;return r;});
  if(['startExam','resumeAttempt'].includes(action))result.attempt.exam=publicExam(result.attempt.exam);
  if(action==='getResult')result=visibleResult(result);if(action==='getMyResults')result=result.map(visibleResult).filter(Boolean);if(action==='submitExam')result.result=visibleResult(result.result);
