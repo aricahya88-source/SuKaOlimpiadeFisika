@@ -11,8 +11,9 @@ import { Badge, Modal } from '@/components/ui';
 import { MathHtml, ZoomableImage } from '@/components/math-html';
 import { QuestionStimulus } from '@/components/question-stimulus';
 import { useSession } from '@/contexts/session-context';
-import { getExamApi, type Attempt, type ExamResult, type ExamSummary, type PreflightResult, type Question, type SaveStatus } from '@/lib/api';
+import { getExamApi, type Attempt, type ExamResult, type ExamSummary, type PreflightResult, type Question, type SaveStatus, type SaveAnswersResponse, type SubmitResponse } from '@/lib/api';
 import { checkStorageReadiness, deleteLocalAttempt, findLocalAttemptByExam, saveLocalAttempt } from '@/lib/exam-store';
+import { differingAnswerIds } from '@/lib/answer-sync';
 import { formatBytes, formatCountdown, formatDateTime, formatDuration } from '@/lib/format';
 import { isExamSimulationIframeFocused, shouldRecordExamFocusExit } from '@/lib/exam-focus';
 
@@ -35,6 +36,8 @@ export default function ExamPage() {
   const [dirtyCount, setDirtyCount] = useState(0);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('synced');
   const [lastSyncAt, setLastSyncAt] = useState<string | undefined>();
+  const [deadlineLocked, setDeadlineLocked] = useState(false);
+  const [submissionWarning, setSubmissionWarning] = useState('');
   const [storageWarning, setStorageWarning] = useState('');
   const [online, setOnline] = useState(true);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
@@ -55,7 +58,17 @@ export default function ExamPage() {
   const fullscreenExpected = useRef(false);
   const simulationFullscreenActive = useRef(false);
   const lastFocusEventAt = useRef(0);
-  const syncInFlight = useRef(false);
+  const syncPromiseRef = useRef<Promise<boolean> | null>(null);
+  const latestAnswersRef = useRef<Record<string, string>>({});
+  const latestRevisionRef = useRef(0);
+  const changeVersionRef = useRef(0);
+  const savedVersionRef = useRef(0);
+  const submissionIdRef = useRef<string | null>(null);
+  const deadlineLockedRef = useRef(false);
+  const lockedAtRef = useRef<string | undefined>(undefined);
+  const finalizingRef = useRef(false);
+  const clockRef = useRef<{ deadline: number; serverAt: number; performanceAt: number } | null>(null);
+  const previouslyOnlineRef = useRef(true);
   const prefetchInFlight = useRef(false);
   const autoSubmitStarted = useRef(false);
 
@@ -108,47 +121,92 @@ export default function ExamPage() {
     });
   }, []);
 
-  const persistLocal = useCallback(async (next?: Partial<{ answers: Record<string, string>; flagged: string[]; currentIndex: number; revision: number; lastSyncAt: string | undefined }>) => {
+  const persistLocal = useCallback(async (next?: Partial<{ answers: Record<string, string>; flagged: string[]; currentIndex: number; revision: number; lastSyncAt: string | undefined; lockedAt: string | undefined }>) => {
     if (!attempt) return;
     const response = await saveLocalAttempt({
       attemptId: attempt.attemptId,
       examId: attempt.examId,
       currentIndex: next?.currentIndex ?? currentIndex,
-      answers: next?.answers ?? answers,
+      answers: next?.answers ?? latestAnswersRef.current,
       flagged: next?.flagged ?? flagged,
-      revision: next?.revision ?? revision,
+      revision: next?.revision ?? latestRevisionRef.current,
       lastSyncAt: next?.lastSyncAt ?? lastSyncAt,
+      lockedAt: next?.lockedAt ?? lockedAtRef.current,
       updatedAt: new Date().toISOString(),
     });
     if (!response.ok) {
       setStorageWarning(response.quotaExceeded ? 'Penyimpanan HP penuh. Jawaban tetap disimpan di memori dan akan disinkronkan ke server saat online.' : 'Backup lokal tidak tersedia. Pastikan koneksi tetap aktif.');
-      setSaveStatus(navigator.onLine ? 'local-only' : 'error');
+      if (changeVersionRef.current > savedVersionRef.current) setSaveStatus('error');
     }
-  }, [attempt, currentIndex, answers, flagged, revision, lastSyncAt]);
+  }, [attempt, currentIndex, flagged, lastSyncAt]);
 
-  const syncAnswers = useCallback(async (force = false) => {
-    if (!session || !attempt || syncInFlight.current || !['IN_PROGRESS', 'PAUSED'].includes(attempt.status)) return;
-    if (!navigator.onLine) { setSaveStatus('offline'); return; }
-    if (!force && dirtyCount === 0) return;
-    syncInFlight.current = true; setSaveStatus('syncing');
-    try {
-      const response = await getExamApi().saveAnswers(session.token, attempt.attemptId, revision + 1, answers);
-      setRevision(response.revision); setLastSyncAt(response.lastSyncAt); setDirtyCount(0); setSaveStatus('synced');
-      await persistLocal({ revision: response.revision, lastSyncAt: response.lastSyncAt });
-    } catch {
-      setSaveStatus(navigator.onLine ? 'error' : 'offline');
-    } finally { syncInFlight.current = false; }
-  }, [session, attempt, dirtyCount, revision, answers, persistLocal]);
+  // Clock is anchored to a server timestamp using monotonic performance.now().
+  // Editing is still enforced on the server independently of this client clock.
+  const remainingByServerClock = () => {
+    const clock = clockRef.current;
+    return clock ? clock.deadline - (clock.serverAt + performance.now() - clock.performanceAt) : Number.POSITIVE_INFINITY;
+  };
+
+  const syncAnswers = useCallback(async (_force = false): Promise<boolean> => {
+    if (syncPromiseRef.current) return syncPromiseRef.current;
+    if (!session || !attempt || attempt.status !== 'IN_PROGRESS' || deadlineLockedRef.current) return false;
+    if (changeVersionRef.current === savedVersionRef.current) return true;
+    if (!navigator.onLine) { setSaveStatus('offline'); return false; }
+    let snapshot = { ...latestAnswersRef.current };
+    let includedVersion = changeVersionRef.current;
+    const nextRevision = latestRevisionRef.current + 1;
+    setSaveStatus('syncing');
+    const pending = (async () => {
+      try {
+        let response: SaveAnswersResponse;
+        try {
+          response = await getExamApi().saveAnswers(session.token, attempt.attemptId, nextRevision, snapshot);
+        } catch (firstError) {
+          if (!(firstError instanceof Error) || !/revisi jawaban.*kedaluwarsa/i.test(firstError.message)) throw firstError;
+          // Lost HTTP acknowledgement must not cause an older revision to overwrite server data.
+          const resumed = await getExamApi().resumeAttempt(session.token, attempt.attemptId, 0, 1);
+          latestRevisionRef.current = Math.max(latestRevisionRef.current, resumed.attempt.revision);
+          snapshot = { ...latestAnswersRef.current };
+          includedVersion = changeVersionRef.current;
+          response = await getExamApi().saveAnswers(session.token, attempt.attemptId, latestRevisionRef.current + 1, snapshot);
+        }
+        // An HTTP 200 or revision counter alone does not prove the answers reached the server.
+        const serverAnswers = response.confirmedAnswers ?? (await getExamApi().resumeAttempt(session.token, attempt.attemptId, 0, 1)).answers;
+        if (differingAnswerIds(snapshot, serverAnswers).length) {
+          throw new Error('Konfirmasi server berbeda dari jawaban yang dikirim.');
+        }
+        latestRevisionRef.current = Math.max(latestRevisionRef.current, response.revision);
+        savedVersionRef.current = Math.max(savedVersionRef.current, includedVersion);
+        const remaining = Math.max(0, changeVersionRef.current - savedVersionRef.current);
+        setRevision(latestRevisionRef.current);
+        setLastSyncAt(response.lastSyncAt);
+        setDirtyCount(remaining);
+        setSaveStatus(remaining ? 'local-only' : 'synced');
+        await persistLocal({ answers: { ...latestAnswersRef.current }, revision: latestRevisionRef.current, lastSyncAt: response.lastSyncAt });
+        return remaining === 0;
+      } catch {
+        setSaveStatus(navigator.onLine ? 'error' : 'offline');
+        return false;
+      } finally {
+        syncPromiseRef.current = null;
+      }
+    })();
+    syncPromiseRef.current = pending;
+    return pending;
+  }, [session, attempt, persistLocal]);
 
   useEffect(() => {
     if (phase !== 'exam') return;
-    const id = window.setInterval(() => syncAnswers(false), 30_000);
+    const id = window.setInterval(() => syncAnswers(false), 15_000);
     return () => window.clearInterval(id);
   }, [phase, syncAnswers, session, attempt?.attemptId]);
 
+  // Fast debounce protects the last answer in a high-stakes timed test.
   useEffect(() => {
-    if (phase === 'exam' && dirtyCount >= 5) syncAnswers(true);
-  }, [phase, dirtyCount, syncAnswers]);
+    if ((phase !== 'exam' && phase !== 'review') || dirtyCount < 1 || deadlineLocked) return;
+    const id = window.setTimeout(() => { void syncAnswers(true); }, 900);
+    return () => window.clearTimeout(id);
+  }, [phase, dirtyCount, deadlineLocked, syncAnswers]);
 
   useEffect(() => {
     if (phase !== 'exam' && phase !== 'review') return;
@@ -283,23 +341,64 @@ export default function ExamPage() {
     setError(''); setRemainingMs(null); autoSubmitStarted.current = false; setPhase('starting');
     try {
       let response;
-      const local = await findLocalAttemptByExam(examId);
+      const local = await findLocalAttemptByExam(examId, summary.attemptId);
+      if (summary.attemptStatus === 'SUBMITTED' && summary.attemptId) {
+        const restored = await getExamApi().resumeAttempt(session.token, summary.attemptId, 0, 1);
+        setAttempt(restored.attempt);
+        const diff = local?.attemptId === summary.attemptId ? differingAnswerIds(local.answers, restored.answers) : [];
+        setSubmissionWarning(diff.length ? `${diff.length} jawaban lokal berbeda dari jawaban server. Backup perangkat tetap disimpan. Segera hubungi panitia untuk pemeriksaan.` : '');
+        if (local?.attemptId === summary.attemptId && !diff.length) await deleteLocalAttempt(summary.attemptId);
+        setResult(await getExamApi().getResult(session.token, summary.attemptId));
+        setPhase('submitted');
+        return;
+      }
       if (['IN_PROGRESS', 'PAUSED'].includes(String(summary.attemptStatus || '')) && summary.attemptId) {
         response = await getExamApi().resumeAttempt(session.token, summary.attemptId, 0, 10);
-        setAttempt(response.attempt); mergeQuestions(response.questions); setAnswers({ ...response.answers, ...(local?.answers || {}) });
-        setFlagged(local?.flagged || []); setCurrentIndex(Math.min(local?.currentIndex || 0, response.attempt.questionCount - 1)); setRevision(Math.max(response.attempt.revision, local?.revision || 0));
+        const recoveredAnswers = { ...response.answers, ...(local?.attemptId === response.attempt.attemptId ? local.answers : {}) };
+        const needsSync = Object.keys(recoveredAnswers).some((id) => recoveredAnswers[id] !== response.answers[id]);
+        latestAnswersRef.current = recoveredAnswers;
+        lockedAtRef.current = local?.attemptId === response.attempt.attemptId ? local?.lockedAt : undefined;
+        deadlineLockedRef.current = Boolean(lockedAtRef.current);
+        latestRevisionRef.current = response.attempt.revision;
+        changeVersionRef.current = needsSync ? 1 : 0;
+        savedVersionRef.current = 0;
+        setDirtyCount(needsSync ? 1 : 0);
+        setSaveStatus(needsSync ? 'local-only' : 'synced');
+        setAttempt(response.attempt); mergeQuestions(response.questions); setAnswers(recoveredAnswers);
+        setFlagged(local?.flagged || []); setCurrentIndex(Math.min(local?.currentIndex || 0, response.attempt.questionCount - 1)); setRevision(response.attempt.revision);
       } else {
-        if (local?.attemptId) await deleteLocalAttempt(local.attemptId);
+        // Never delete a previous local backup before the server accepts a submission.
         response = await getExamApi().startExam(session.token, examId, examToken || undefined);
+        latestAnswersRef.current = {};
+        lockedAtRef.current = undefined;
+        deadlineLockedRef.current = false;
+        latestRevisionRef.current = response.attempt.revision;
+        changeVersionRef.current = 0;
+        savedVersionRef.current = 0;
+        setDirtyCount(0); setSaveStatus('synced');
         setAttempt(response.attempt); mergeQuestions(response.initialQuestions); setAnswers({}); setFlagged([]); setCurrentIndex(0); setRevision(response.attempt.revision);
       }
+      submissionIdRef.current = null;
       const activeAttempt = response.attempt;
       setAttemptPaused(activeAttempt.status === 'PAUSED');
       const expiresAtMs = new Date(activeAttempt.expiresAt).getTime();
       const serverTimeMs = new Date(activeAttempt.serverTime).getTime();
       const initialRemaining = Number.isFinite(expiresAtMs) && Number.isFinite(serverTimeMs) ? expiresAtMs - serverTimeMs : null;
+      if (Number.isFinite(expiresAtMs) && Number.isFinite(serverTimeMs)) {
+        clockRef.current = { deadline: expiresAtMs, serverAt: serverTimeMs, performanceAt: performance.now() };
+      } else clockRef.current = null;
+      const isExpired = !Number.isFinite(expiresAtMs) || !Number.isFinite(serverTimeMs) || initialRemaining === null || initialRemaining <= 0 || Boolean(lockedAtRef.current);
+      if (isExpired && activeAttempt.status !== 'PAUSED') {
+        deadlineLockedRef.current = true;
+        lockedAtRef.current ||= new Date().toISOString();
+        setDeadlineLocked(true);
+        setPhase('review');
+        void saveLocalAttempt({ attemptId: activeAttempt.attemptId, examId: activeAttempt.examId, currentIndex: local?.currentIndex || 0, answers: { ...latestAnswersRef.current }, flagged: local?.flagged || [], revision: latestRevisionRef.current, lockedAt: lockedAtRef.current, updatedAt: new Date().toISOString() });
+      } else {
+        setDeadlineLocked(false);
+        setPhase('exam');
+      }
       setRemainingMs(initialRemaining === null ? null : Math.max(0, initialRemaining));
-      setSaveStatus('synced'); setPhase('exam');
     } catch (err) { setError(err instanceof Error ? err.message : 'Gagal memulai ujian.'); setPhase('preflight'); }
   };
 
@@ -317,23 +416,28 @@ export default function ExamPage() {
     if (!attempt || attemptPaused || (phase !== 'exam' && phase !== 'review')) return;
     const expiresAtMs = new Date(attempt.expiresAt).getTime();
     const serverTimeMs = new Date(attempt.serverTime).getTime();
-    const clientAnchorMs = Date.now();
-    const serverOffsetMs = Number.isFinite(serverTimeMs) ? serverTimeMs - clientAnchorMs : 0;
+    if (Number.isFinite(expiresAtMs) && Number.isFinite(serverTimeMs)) {
+      clockRef.current = { deadline: expiresAtMs, serverAt: serverTimeMs, performanceAt: performance.now() };
+    }
     const update = () => {
-      if (!Number.isFinite(expiresAtMs)) { setRemainingMs(null); return; }
-      setRemainingMs(expiresAtMs - (Date.now() + serverOffsetMs));
+      if (!clockRef.current) { setRemainingMs(null); return; }
+      setRemainingMs(remainingByServerClock());
     };
     update(); const id = window.setInterval(update, 1000); return () => window.clearInterval(id);
   }, [attempt, phase, attemptPaused]);
 
   const setAnswerValue = (questionId: string, value: string) => {
-    const nextAnswers = { ...answers, [questionId]: value };
-    setAnswers(nextAnswers); setDirtyCount((count) => count + 1); setSaveStatus(online ? 'local-only' : 'offline');
+    // Ref guard prevents a queued click from sneaking through during expiry/submission.
+    if (deadlineLockedRef.current || finalizingRef.current || remainingByServerClock() <= 0 || attemptPaused) return;
+    const nextAnswers = { ...latestAnswersRef.current, [questionId]: value };
+    latestAnswersRef.current = nextAnswers;
+    changeVersionRef.current += 1;
+    setAnswers(nextAnswers); setDirtyCount(changeVersionRef.current - savedVersionRef.current); setSaveStatus(online ? 'local-only' : 'offline');
     persistLocal({ answers: nextAnswers });
   };
   const chooseAnswer = (question: Question, value: string) => {
     if (question.questionType === 'MULTIPLE_CHOICE') {
-      const current = String(answers[question.questionId] || '').split(',').filter(Boolean);
+      const current = String(latestAnswersRef.current[question.questionId] || '').split(',').filter(Boolean);
       const next = current.includes(value) ? current.filter((item) => item !== value) : [...current, value];
       setAnswerValue(question.questionId, next.sort().join(','));
       return;
@@ -341,7 +445,7 @@ export default function ExamPage() {
     setAnswerValue(question.questionId, value);
   };
   const chooseTrueFalse = (question: Question, statementIndex: number, value: 'B' | 'S') => {
-    const parts = String(answers[question.questionId] || '').split(',');
+    const parts = String(latestAnswersRef.current[question.questionId] || '').split(',');
     while (parts.length < question.options.length) parts.push('');
     parts[statementIndex] = value;
     setAnswerValue(question.questionId, parts.join(','));
@@ -355,12 +459,12 @@ export default function ExamPage() {
     }
   };
   const chooseMatching = (question: Question, leftId: string, rightId: string) => {
-    const next = { ...parseMatchingAnswer(String(answers[question.questionId] || '')), [leftId]: rightId };
+    const next = { ...parseMatchingAnswer(String(latestAnswersRef.current[question.questionId] || '')), [leftId]: rightId };
     setAnswerValue(question.questionId, JSON.stringify(next));
   };
 
   const toggleFlag = () => {
-    if (!currentQuestion) return;
+    if (!currentQuestion || deadlineLockedRef.current || finalizingRef.current) return;
     const next = flagged.includes(currentQuestion.questionId) ? flagged.filter((id) => id !== currentQuestion.questionId) : [...flagged, currentQuestion.questionId];
     setFlagged(next); persistLocal({ flagged: next });
   };
@@ -371,25 +475,85 @@ export default function ExamPage() {
   };
 
   const finalize = useCallback(async (expired = false) => {
-    if (!session || !attempt || phase === 'submitting' || phase === 'submitted') return;
+    if (!session || !attempt || finalizingRef.current || phase === 'submitted') return;
+    finalizingRef.current = true;
+    const permanentlyLocked = expired || deadlineLockedRef.current || remainingByServerClock() <= 0;
+    if (permanentlyLocked) {
+      deadlineLockedRef.current = true;
+      lockedAtRef.current ||= new Date().toISOString();
+      setDeadlineLocked(true);
+    }
     setPhase('submitting'); setError('');
     try {
-      if (navigator.onLine) await syncAnswers(true);
-      const submissionId = typeof crypto !== 'undefined' && crypto.randomUUID ? `SUB-${crypto.randomUUID()}` : `SUB-${Date.now()}`;
-      const response = await getExamApi().submitExam(session.token, { attemptId: attempt.attemptId, submissionId, revision: revision + 1, answers });
-      setResult(response.result || null); await deleteLocalAttempt(attempt.attemptId); setPhase('submitted');
+      // Persist the latest answer snapshot locally BEFORE attempting submission.
+      await persistLocal({ answers: { ...latestAnswersRef.current }, lockedAt: lockedAtRef.current });
+      if (syncPromiseRef.current) await syncPromiseRef.current;
+      if (!navigator.onLine) throw new Error('Tidak ada koneksi. Backup lokal dipertahankan sampai koneksi kembali.');
+      if (!submissionIdRef.current) submissionIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID ? `SUB-${crypto.randomUUID()}` : `SUB-${Date.now()}`;
+      const snapshot = { ...latestAnswersRef.current };
+      const send = () => getExamApi().submitExam(session.token, { attemptId: attempt.attemptId, submissionId: submissionIdRef.current!, revision: latestRevisionRef.current + 1, answers: snapshot });
+      let response: SubmitResponse;
+      try { response = await send(); }
+      catch (firstError) {
+        if (!(firstError instanceof Error) || !/revisi jawaban.*kedaluwarsa/i.test(firstError.message)) throw firstError;
+        const resumed = await getExamApi().resumeAttempt(session.token, attempt.attemptId, 0, 1);
+        latestRevisionRef.current = Math.max(latestRevisionRef.current, resumed.attempt.revision);
+        response = await send();
+      }
+      if (!response.accepted) throw new Error('Server belum menerima pengumpulan. Backup dipertahankan.');
+      // Neon/demo now return the actual persisted answers; older backends fall back
+      // to a read-back. Do not clear local backup unless every value is confirmed.
+      let confirmed = response.confirmedAnswers;
+      if (!confirmed) {
+        try { confirmed = (await getExamApi().resumeAttempt(session.token, attempt.attemptId, 0, 1)).answers; }
+        catch { confirmed = undefined; }
+      }
+      const missing = confirmed ? differingAnswerIds(snapshot, confirmed) : Object.keys(snapshot);
+      if (missing.length || !confirmed) {
+        setSubmissionWarning(`Pengumpulan diterima, tetapi ${missing.length || 'sejumlah'} jawaban belum cocok/terverifikasi pada server. Backup tidak dihapus. Jangan bersihkan data browser; hubungi panitia dengan ID pengerjaan ini.`);
+      } else {
+        setSubmissionWarning('');
+        await deleteLocalAttempt(attempt.attemptId);
+      }
+      setResult(response.result || null);
+      setPhase('submitted');
     } catch (err) {
-      setError(`${expired ? 'Waktu ujian telah habis. ' : ''}${err instanceof Error ? err.message : 'Jawaban belum berhasil dikirim.'} Backup lokal belum dihapus.`);
+      const isNowExpired = permanentlyLocked || remainingByServerClock() <= 0;
+      if (isNowExpired) {
+        deadlineLockedRef.current = true;
+        lockedAtRef.current ||= new Date().toISOString();
+        setDeadlineLocked(true);
+        void persistLocal({ lockedAt: lockedAtRef.current });
+      }
+      setError(`${isNowExpired ? 'Waktu ujian telah habis. ' : ''}${err instanceof Error ? err.message : 'Jawaban belum berhasil dikirim.'} Backup lokal tidak dihapus.`);
       setPhase('review');
-    }
-  }, [session, attempt, phase, syncAnswers, revision, answers]);
+    } finally { finalizingRef.current = false; }
+  }, [session, attempt, phase, persistLocal]);
 
   useEffect(() => {
-    if (!attemptPaused && (phase === 'exam' || phase === 'review') && remainingMs !== null && remainingMs <= 0 && attempt && !autoSubmitStarted.current) {
-      autoSubmitStarted.current = true;
-      finalize(true);
+    if (!attemptPaused && (phase === 'exam' || phase === 'review') && remainingMs !== null && remainingMs <= 0 && attempt) {
+      if (!deadlineLockedRef.current) {
+        deadlineLockedRef.current = true;
+        lockedAtRef.current ||= new Date().toISOString();
+        setDeadlineLocked(true);
+        void persistLocal({ lockedAt: lockedAtRef.current });
+      }
+      if (!autoSubmitStarted.current) {
+        autoSubmitStarted.current = true;
+        if (navigator.onLine) void finalize(true);
+        else { setPhase('review'); setError('Waktu berakhir saat offline. Jawaban dikunci dan backup tetap tersimpan. Sambungkan internet untuk mengonfirmasi pengumpulan.'); }
+      }
     }
-  }, [remainingMs, phase, attempt, finalize, attemptPaused]);
+  }, [remainingMs, phase, attempt, attemptPaused, finalize, persistLocal]);
+
+  // Retry automatically only on an actual offline -> online transition.
+  // An always-online API error must not cause an infinite submit loop.
+  useEffect(() => {
+    if (online && !previouslyOnlineRef.current && deadlineLockedRef.current && phase === 'review') {
+      void finalize(true);
+    }
+    previouslyOnlineRef.current = online;
+  }, [online, deadlineLocked, phase, finalize]);
 
 
   const refreshAttemptControl = useCallback(async () => {
@@ -399,6 +563,11 @@ export default function ExamPage() {
       setFocusViolationCount(control.focusViolationCount || 0);
       setAttemptPaused(control.status === 'PAUSED');
       setAttempt((current) => current ? { ...current, status: control.status, expiresAt: control.expiresAt || current.expiresAt, serverTime: control.serverTime || current.serverTime } : current);
+      const nextDeadline = Date.parse(control.expiresAt || attempt.expiresAt);
+      const nextServer = Date.parse(control.serverTime || new Date().toISOString());
+      if (Number.isFinite(nextDeadline) && Number.isFinite(nextServer)) {
+        clockRef.current = { deadline: nextDeadline, serverAt: nextServer, performanceAt: performance.now() };
+      }
       if (control.warningAt && control.warningAt !== lastTeacherWarningRef.current) {
         lastTeacherWarningRef.current = control.warningAt;
         setTeacherWarning(control.warningMessage || 'Panitia mengirim peringatan. Tetap fokus pada ujian.');
@@ -436,15 +605,15 @@ export default function ExamPage() {
         {summary.tokenRequired && <label className="token-field">Token ujian<input value={examToken} onChange={(e) => setExamToken(e.target.value.toUpperCase())} placeholder="Masukkan token" autoCapitalize="characters"/></label>}
         {storageWarning && <div className="notice warning"><AlertTriangle size={18}/>{storageWarning}</div>}
         {error && <div className="notice danger">{error}</div>}
-        <button className="button primary full" disabled={!online || phase === 'starting' || (summary.tokenRequired && !examToken)} onClick={begin}>{phase === 'starting' ? <><LoaderCircle className="spin" size={19}/>Menyiapkan soal...</> : ['IN_PROGRESS', 'PAUSED'].includes(String(summary.attemptStatus || '')) ? <><RefreshCw size={19}/>Lanjutkan ujian</> : <><ShieldCheck size={19}/>Mulai ujian</>}</button>
+        <button className="button primary full" disabled={!online || phase === 'starting' || (summary.tokenRequired && !examToken && summary.attemptStatus !== 'SUBMITTED' && !summary.attemptId)} onClick={begin}>{phase === 'starting' ? <><LoaderCircle className="spin" size={19}/>Menyiapkan soal...</> : summary.attemptStatus === 'SUBMITTED' ? <><ShieldCheck size={19}/>Periksa bukti pengumpulan</> : ['IN_PROGRESS', 'PAUSED'].includes(String(summary.attemptStatus || '')) ? <><RefreshCw size={19}/>Lanjutkan ujian</> : <><ShieldCheck size={19}/>Mulai ujian</>}</button>
         <p className="small-note">Timer baru berjalan setelah attempt dan batch soal awal berhasil disiapkan.</p>
       </section>
     </div>
   </StudentShell></AuthGuard>;
 
-  if (phase === 'submitted') return <AuthGuard role="student"><StudentShell hideNav><div className="submitted-page"><div className="success-ring"><CheckCircle2 size={46}/></div><span className="eyebrow">BERHASIL DIKUMPULKAN</span><h1>Jawaban Anda sudah diterima.</h1><p>Attempt <code>{attempt?.attemptId}</code> telah ditutup dan backup lokal dihapus setelah server memberikan acknowledgement.</p>{result?.visible ? <div className="final-score"><strong>{result.score}</strong><span>Nilai</span><div><span>{result.correctCount} benar</span><span>{result.wrongCount} salah</span><span>{result.blankCount} kosong</span></div></div> : <div className="notice neutral">Nilai belum ditampilkan sesuai pengaturan ujian.</div>}<button className="button primary" onClick={() => router.replace('/student')}>Kembali ke beranda</button></div></StudentShell></AuthGuard>;
+  if (phase === 'submitted') return <AuthGuard role="student"><StudentShell hideNav><div className="submitted-page"><div className="success-ring"><CheckCircle2 size={46}/></div><span className="eyebrow">{submissionWarning ? 'PERLU PEMERIKSAAN PANITIA' : 'BERHASIL DIKUMPULKAN'}</span><h1>{submissionWarning ? 'Pengumpulan diterima, perlu pemeriksaan' : 'Jawaban Anda sudah diterima.'}</h1><p>Attempt <code>{attempt?.attemptId}</code> telah ditutup. {submissionWarning ? 'Cadangan jawaban tetap disimpan di perangkat ini.' : 'Jawaban telah diverifikasi dengan data yang tersimpan di server.'}</p>{submissionWarning && <div className="notice warning"><AlertTriangle size={18}/>{submissionWarning}</div>}{result?.visible && !submissionWarning ? <div className="final-score"><strong>{result.score}</strong><span>Nilai</span><div><span>{result.correctCount} benar</span><span>{result.wrongCount} salah</span><span>{result.blankCount} kosong</span></div></div> : !submissionWarning ? <div className="notice neutral">Nilai belum ditampilkan sesuai pengaturan ujian.</div> : null}<button className="button primary" onClick={() => router.replace('/student')}>Kembali ke beranda</button></div></StudentShell></AuthGuard>;
 
-  if (phase === 'review' || phase === 'submitting') return <AuthGuard role="student"><StudentShell hideNav><div className="review-page exam-protected"><button className="text-button" disabled={phase === 'submitting'} onClick={() => setPhase('exam')}><ArrowLeft size={18}/>Kembali ke soal</button><span className="eyebrow">REVIEW</span><h1>Periksa sebelum mengirim</h1><p>Setelah berhasil dikumpulkan, jawaban tidak dapat diubah kembali.</p><div className="review-stats"><div><strong>{answeredCount}</strong><span>Terjawab</span></div><div><strong>{Math.max(0, totalQuestions - answeredCount)}</strong><span>Belum dijawab</span></div><div><strong>{flagged.length}</strong><span>Ragu-ragu</span></div></div>{error && <div className="notice danger">{error}</div>}<div className="number-grid review-grid">{Array.from({ length: totalQuestions }, (_, idx) => { const q = questions[idx + 1]; const answered = q && answers[q.questionId]; const isFlagged = q && flagged.includes(q.questionId); return <button key={idx} className={`number-chip ${answered ? 'answered' : ''} ${isFlagged ? 'flagged' : ''}`} onClick={() => { moveTo(idx); setPhase('exam'); }}>{idx + 1}{isFlagged && <Flag size={10}/>}</button>; })}</div><button className="button primary full" disabled={phase === 'submitting' || !online} onClick={() => finalize(false)}>{phase === 'submitting' ? <><LoaderCircle className="spin" size={19}/>Mengirim jawaban...</> : <><Send size={19}/>Kirim jawaban</>}</button>{!online && <div className="notice warning"><CloudOff size={18}/>Sambungkan internet untuk final submit. Jawaban tetap tersimpan sementara.</div>}</div>{pauseOverlay}{teacherWarningModal}{focusGuardModal}</StudentShell></AuthGuard>;
+  if (phase === 'review' || phase === 'submitting') return <AuthGuard role="student"><StudentShell hideNav><div className="review-page exam-protected">{!deadlineLocked && <button className="text-button" disabled={phase === 'submitting'} onClick={() => setPhase('exam')}><ArrowLeft size={18}/>Kembali ke soal</button>}<span className="eyebrow">{deadlineLocked ? 'WAKTU HABIS' : 'REVIEW'}</span><h1>{deadlineLocked ? 'Jawaban dikunci' : 'Periksa sebelum mengirim'}</h1><p>{deadlineLocked ? 'Tidak ada waktu tambahan untuk mengubah jawaban. Sistem akan memverifikasi jawaban yang sudah diterima server.' : 'Setelah berhasil dikumpulkan, jawaban tidak dapat diubah kembali.'}</p><div className="review-stats"><div><strong>{answeredCount}</strong><span>Terjawab</span></div><div><strong>{Math.max(0, totalQuestions - answeredCount)}</strong><span>Belum dijawab</span></div><div><strong>{flagged.length}</strong><span>Ragu-ragu</span></div></div>{error && <div className="notice danger">{error}</div>}<div className="number-grid review-grid">{Array.from({ length: totalQuestions }, (_, idx) => { const q = questions[idx + 1]; const answered = q && answers[q.questionId]; const isFlagged = q && flagged.includes(q.questionId); return <button key={idx} className={`number-chip ${answered ? 'answered' : ''} ${isFlagged ? 'flagged' : ''}`} disabled={deadlineLocked || phase === 'submitting'} onClick={() => { moveTo(idx); setPhase('exam'); }}>{idx + 1}{isFlagged && <Flag size={10}/>}</button>; })}</div><button className="button primary full" disabled={phase === 'submitting' || !online} onClick={() => finalize(false)}>{phase === 'submitting' ? <><LoaderCircle className="spin" size={19}/>Mengirim jawaban...</> : deadlineLocked ? <><Send size={19}/>Konfirmasi pengumpulan</> : <><Send size={19}/>Kirim jawaban</>}</button>{!online && <div className="notice warning"><CloudOff size={18}/>Sambungkan internet untuk final submit. Jawaban tetap tersimpan sementara.</div>}</div>{pauseOverlay}{teacherWarningModal}{focusGuardModal}</StudentShell></AuthGuard>;
 
   return <AuthGuard role="student"><StudentShell hideNav>
     <div className={`exam-screen exam-protected font-${fontSize}`}>

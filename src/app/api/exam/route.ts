@@ -5,8 +5,10 @@ export async function POST(req:Request){
  try{
   if(Number(req.headers.get('content-length')||0)>2500000)throw new Error('Data terlalu besar.');
   const text=await req.text();if(text.length>2500000)throw new Error('Data terlalu besar.');const {action,args}=JSON.parse(text);
+  // Trusted server timestamp AFTER full request body arrival (not a client clock).
+  const receivedAt=Date.now();
   if(typeof action==='string')actionName=action.slice(0,50);
-  const data=await execute(action,args,req.headers.get('x-nf-client-connection-ip')||'unknown');return NextResponse.json({ok:true,data},{headers:{'Cache-Control':'no-store'}});
+  const data=await execute(action,args,req.headers.get('x-nf-client-connection-ip')||'unknown',undefined,receivedAt);return NextResponse.json({ok:true,data},{headers:{'Cache-Control':'no-store'}});
  }catch(e){
   const err=e as Error&{code?:string};
   const transient=['57014','53300','55P03','57P03','08001','08006'].includes(err.code||'')||/timeout|ECONNRESET|ETIMEDOUT|connection terminated|remaining connection slots/i.test(err.message||'');

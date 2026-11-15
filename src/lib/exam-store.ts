@@ -6,12 +6,17 @@ export interface LocalAttemptState {
   flagged: string[];
   revision: number;
   lastSyncAt?: string;
+  /** Time of irrevocable answer lock on this device (server deadline remains authoritative). */
+  lockedAt?: string;
   updatedAt: string;
 }
 
 const DB_NAME = 'suka-olimpiade-fisika-exam';
 const DB_VERSION = 1;
 const STORE = 'attempts';
+// Keep writes for the same attempt in call order, so an older asynchronous
+// IndexedDB write cannot overwrite answers from a newer click.
+const pendingWrites = new Map<string, Promise<{ ok: boolean; quotaExceeded?: boolean }>>();
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -26,7 +31,7 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveLocalAttempt(state: LocalAttemptState): Promise<{ ok: boolean; quotaExceeded?: boolean }> {
+async function writeLocalAttempt(state: LocalAttemptState): Promise<{ ok: boolean; quotaExceeded?: boolean }> {
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
@@ -42,6 +47,18 @@ export async function saveLocalAttempt(state: LocalAttemptState): Promise<{ ok: 
     const name = error instanceof DOMException ? error.name : '';
     return { ok: false, quotaExceeded: name === 'QuotaExceededError' };
   }
+}
+
+export function saveLocalAttempt(state: LocalAttemptState): Promise<{ ok: boolean; quotaExceeded?: boolean }> {
+  const previous = pendingWrites.get(state.attemptId);
+  const next = previous
+    ? previous.then(() => writeLocalAttempt(state), () => writeLocalAttempt(state))
+    : writeLocalAttempt(state);
+  pendingWrites.set(state.attemptId, next);
+  void next.then(() => {
+    if (pendingWrites.get(state.attemptId) === next) pendingWrites.delete(state.attemptId);
+  });
+  return next;
 }
 
 export async function getLocalAttempt(attemptId: string): Promise<LocalAttemptState | null> {
@@ -60,13 +77,16 @@ export async function getLocalAttempt(attemptId: string): Promise<LocalAttemptSt
   }
 }
 
-export async function findLocalAttemptByExam(examId: string): Promise<LocalAttemptState | null> {
+export async function findLocalAttemptByExam(examId: string, attemptId?: string): Promise<LocalAttemptState | null> {
   try {
     const db = await openDb();
     const result = await new Promise<LocalAttemptState | null>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly');
       const request = tx.objectStore(STORE).getAll();
-      request.onsuccess = () => resolve((request.result as LocalAttemptState[]).find((item) => item.examId === examId) || null);
+      request.onsuccess = () => {
+        const matching = (request.result as LocalAttemptState[]).filter((item) => item.examId === examId);
+        resolve(attemptId ? matching.find((item) => item.attemptId === attemptId) || null : matching.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] || null);
+      };
       request.onerror = () => reject(request.error);
     });
     db.close();
@@ -78,6 +98,7 @@ export async function findLocalAttemptByExam(examId: string): Promise<LocalAttem
 
 export async function deleteLocalAttempt(attemptId: string): Promise<void> {
   try {
+    await pendingWrites.get(attemptId);
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');

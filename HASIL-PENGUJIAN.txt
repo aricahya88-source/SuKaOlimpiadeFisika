@@ -1,7 +1,27 @@
-TypeScript: PASS
-Backend PostgreSQL/PGlite integration: PASS
-Next.js production build: PASS
-Existing project verification: PASS
-Neon live connection: not tested (DATABASE_URL not supplied)
-Netlify live deployment: not performed
-Load test: not performed
+SuKa Olimpiade Fisika — Hasil Pemeriksaan Patch v4
+Tanggal pemeriksaan: 13 November 2026
+
+TES UNIT DAN JALUR SERVER: 11/11 LULUS
+ 1. Perbandingan jawaban PG, PGK, BS, dan menjodohkan
+ 2. Jawaban kosong dibandingkan dengan kolom tidak terisi
+ 3. Autosave sebelum tenggat memiliki bukti data server
+ 4. Autosave pascatenggat ditolak pada demo
+ 5. Submit sebelum tenggat, retry idempoten, dan skor utuh
+ 6. Jalur Neon service: menolak save pascatenggat
+ 7. Jalur Neon service: submit pascatenggat hanya memakai data server yang sah
+ 8. Jalur Neon service: submit sebelum tenggat memasukkan revisi baru
+ 9. Save yang payload lengkapnya diterima server sebelum tenggat tetap sah walau DB memprosesnya setelah tenggat
+10. Submit yang payload lengkapnya diterima server sebelum tenggat tetap sah walau DB memprosesnya setelah tenggat
+11. Parameter API tambahan dari browser tidak dapat memalsukan timestamp penerimaan server
+
+Pemeriksaan sintaks TypeScript/TSX: 7 dari 7 file LULUS
+File src/lib/grading.ts: identik dengan source sebelumnya; aturan penilaian tidak diubah.
+ZIP: uji integritas berhasil tanpa error.
+
+BELUM DIVERIFIKASI:
+- npm ci / npm run typecheck / npm run build (instalasi paket terganggu di lingkungan pemeriksaan)
+- Pengujian langsung IndexedDB dan browser secara end-to-end
+- Koneksi dan transaksi Neon yang benar-benar terhubung ke produksi
+- Uji beban real-time dan kestabilan Netlify saat ujian aktif
+
+STATUS: Lulus pengujian unit dan sintaks; wajib pengujian integrasi sebelum deploy production.

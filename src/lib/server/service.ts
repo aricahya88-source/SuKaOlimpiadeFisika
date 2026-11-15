@@ -12,8 +12,11 @@ function assert(ok:unknown,msg:string):asserts ok{if(!ok)throw new Error(msg);}
 const clean=(html:unknown)=>sanitizeHtml(String(html||''),{allowedTags:sanitizeHtml.defaults.allowedTags.concat(['img','span','sub','sup']),allowedAttributes:{'*':['class','style'],img:['src','alt','width','height']},allowedSchemes:['https','http','data'],allowedStyles:{'*':{'text-align':[/^(left|right|center|justify)$/],'font-size':[/^\d+(px|em|rem|%)$/],color:[/^#[0-9a-f]+$/i]}}});
 const publicExam=(x:any)=>{const {token,...rest}=x;return {...rest,tokenRequired:!!token};};
 const visibleResult=(r:any)=>r&&!r.visible?null:r;
-export async function execute(action:string,args:any[],source:string,db=database()){
+export async function execute(action:string,args:any[],source:string,db=database(),requestReceivedAt=Date.now()){
  assert(allowed.has(action),'Aksi tidak dikenal.');assert(Array.isArray(args)&&args.length<=6,'Parameter tidak valid.');
+ // Reject injected extra client arguments: only the server may provide receive time.
+ if(action==='saveAnswers')assert(args.length===4,'Parameter autosave tidak valid.');
+ if(action==='submitExam')assert(args.length===2,'Parameter pengumpulan tidak valid.');
  const c=await db.connect();
  try{
  await c.query('BEGIN');await c.query("SET LOCAL statement_timeout='20s'");
@@ -57,7 +60,9 @@ export async function execute(action:string,args:any[],source:string,db=database
    const alreadySubmitted=a.status==='SUBMITTED';assert(alreadySubmitted&&action==='submitExam'||a.status==='IN_PROGRESS','Pengerjaan sudah berakhir.');const revision=action==='saveAnswers'?args[2]:args[1].revision;assert(Number.isInteger(revision)&&(alreadySubmitted||revision>=a.revision),'Revisi jawaban sudah kedaluwarsa. Muat ulang pengerjaan.');
    const answers=action==='saveAnswers'?args[3]:args[1].answers;assert(answers&&typeof answers==='object'&&!Array.isArray(answers),'Jawaban tidak valid.');
    for(const [id,val] of Object.entries(answers)){assert(a.questionOrder.includes(id)&&typeof val==='string'&&val.length<10000,'Jawaban di luar pengerjaan.');}
-   if(Date.now()>Date.parse(a.expiresAt)){if(action==='saveAnswers')throw new Error('Waktu ujian telah berakhir.');args[1].answers={};}
+   // Deadline compares the moment the FULL request arrived at our server, not
+   // when it eventually acquired the DB transaction lock. Client-provided times are ignored.
+   if(requestReceivedAt>Date.parse(a.expiresAt)){if(action==='saveAnswers')throw new Error('Waktu ujian telah berakhir.');args[1].answers={};}
    if(action==='submitExam')assert(typeof args[1].submissionId==='string'&&args[1].submissionId.length<200,'ID pengumpulan tidak valid.');
   }
  }
@@ -105,7 +110,12 @@ export async function execute(action:string,args:any[],source:string,db=database
  }else {
   // Freeze question content and answer keys for each attempt, even if validator edits the bank later.
   const bank=store.questions;if(a?.snapshot&&['resumeAttempt','getQuestionsBatch','submitExam'].includes(action))store.questions=a.snapshot;
-  result=await engine[action](...args);store.questions=bank;
+  // Explicit argument placement prevents a client-supplied timestamp from shadowing
+  // the trusted timestamp assigned by our Next.js API route.
+  if(action==='saveAnswers')result=await engine.saveAnswers(args[0],args[1],args[2],args[3],requestReceivedAt);
+  else if(action==='submitExam')result=await engine.submitExam(args[0],args[1],requestReceivedAt);
+  else result=await engine[action](...args);
+  store.questions=bank;
   if(action==='startExam'){const at:any=store.attempts.find(x=>x.attemptId===result.attempt.attemptId);if(!at.snapshot)at.snapshot=structuredClone(store.questions.filter(q=>at.questionOrder.includes(q.questionId)));}
  }
  if(['saveStudent','saveTeacher','saveUser'].includes(action))await persistUser(c,result,args[1].password);

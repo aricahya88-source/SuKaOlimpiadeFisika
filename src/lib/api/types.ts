@@ -84,8 +84,9 @@ export interface Attempt {
 }
 export interface StartExamResponse { attempt: Attempt; initialQuestions: Question[]; offset: number; hasMore: boolean; }
 export interface ResumeAttemptResponse { attempt: Attempt; answers: Record<string, string>; questions: Question[]; offset: number; hasMore: boolean; }
-export interface SaveAnswersResponse { attemptId: string; revision: number; lastSyncAt: string; }
-export interface SubmitResponse { submissionId: string; attemptId: string; accepted: boolean; alreadySubmitted?: boolean; submittedAt: string; result?: ExamResult | null; }
+/** Server-side acknowledgement: the exact set of answers stored for this attempt. */
+export interface SaveAnswersResponse { attemptId: string; revision: number; lastSyncAt: string; confirmedAnswers?: Record<string, string>; }
+export interface SubmitResponse { submissionId: string; attemptId: string; accepted: boolean; alreadySubmitted?: boolean; submittedAt: string; result?: ExamResult | null; confirmedAnswers?: Record<string, string>; }
 
 export interface ExamResult {
   examId: string; attemptId: string; title: string; subject: string; score: number; correctCount: number; wrongCount: number;

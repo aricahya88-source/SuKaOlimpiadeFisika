@@ -1,0 +1,8 @@
+538946c613830e4c0de727ba8f7fab0daabe72f24569f35c236d4a2b55ba9436  src/app/api/exam/route.ts
+022bf628b3eef9c643abd29245c7b6ef5ac9ca7eb22fb48936b136d5aaadab02  src/app/student/exam/[examId]/page.tsx
+26a03c3c879c14e696ece5c5f6f6a55ef7056ee4ac1beb7518f5be26825c648c  src/lib/answer-sync.ts
+f47638e74fd6480c011c6a036aea3b25470cbe807fd6800589c01502405cbd33  src/lib/api/types.ts
+63119312923d13c5e3080a14b0ef2a35b9d182e16809567525a6cabcf9ff685f  src/lib/exam-store.ts
+8439648d8793fb366440e40a16f4e8a0b4b25c0521174bfc4fb3576fe1e09f97  src/lib/server/engine.ts
+6ecb3517bf18664e6eea828b27a96b07d352d5f0b43998ce363afb52412f0862  src/lib/server/service.ts
+0253d396a97826b4327721a77f313ee494d107b4d476f62c74932110d8a25d7d  tests/recovery-patch.test.cjs
