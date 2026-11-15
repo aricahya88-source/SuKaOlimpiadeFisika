@@ -340,7 +340,7 @@ export default function ExamPage() {
     if (!navigator.onLine && !['IN_PROGRESS', 'PAUSED'].includes(String(summary.attemptStatus || ''))) { setError('Koneksi internet diperlukan untuk memulai attempt baru.'); return; }
     setError(''); setRemainingMs(null); autoSubmitStarted.current = false; setPhase('starting');
     try {
-      let response: StartExamResponse | ResumeAttemptResponse;
+      let activeAttempt: Attempt;
       const local = await findLocalAttemptByExam(examId, summary.attemptId);
       if (summary.attemptStatus === 'SUBMITTED' && summary.attemptId) {
         const restored = await getExamApi().resumeAttempt(session.token, summary.attemptId, 0, 1);
@@ -353,33 +353,35 @@ export default function ExamPage() {
         return;
       }
       if (['IN_PROGRESS', 'PAUSED'].includes(String(summary.attemptStatus || '')) && summary.attemptId) {
-        response = await getExamApi().resumeAttempt(session.token, summary.attemptId, 0, 10);
-        const recoveredAnswers = { ...response.answers, ...(local?.attemptId === response.attempt.attemptId ? local.answers : {}) };
-        const needsSync = Object.keys(recoveredAnswers).some((id) => recoveredAnswers[id] !== response.answers[id]);
+        const resumed: ResumeAttemptResponse = await getExamApi().resumeAttempt(session.token, summary.attemptId, 0, 10);
+        activeAttempt = resumed.attempt;
+        const recoveredAnswers = { ...resumed.answers, ...(local?.attemptId === resumed.attempt.attemptId ? local.answers : {}) };
+        const needsSync = Object.keys(recoveredAnswers).some((id) => recoveredAnswers[id] !== resumed.answers[id]);
         latestAnswersRef.current = recoveredAnswers;
-        lockedAtRef.current = local?.attemptId === response.attempt.attemptId ? local?.lockedAt : undefined;
+        lockedAtRef.current = local?.attemptId === resumed.attempt.attemptId ? local?.lockedAt : undefined;
         deadlineLockedRef.current = Boolean(lockedAtRef.current);
-        latestRevisionRef.current = response.attempt.revision;
+        latestRevisionRef.current = activeAttempt.revision;
         changeVersionRef.current = needsSync ? 1 : 0;
         savedVersionRef.current = 0;
         setDirtyCount(needsSync ? 1 : 0);
         setSaveStatus(needsSync ? 'local-only' : 'synced');
-        setAttempt(response.attempt); mergeQuestions(response.questions); setAnswers(recoveredAnswers);
-        setFlagged(local?.flagged || []); setCurrentIndex(Math.min(local?.currentIndex || 0, response.attempt.questionCount - 1)); setRevision(response.attempt.revision);
+        setAttempt(activeAttempt); mergeQuestions(resumed.questions); setAnswers(recoveredAnswers);
+        setFlagged(local?.flagged || []); setCurrentIndex(Math.min(local?.currentIndex || 0, activeAttempt.questionCount - 1)); setRevision(activeAttempt.revision);
       } else {
         // Never delete a previous local backup before the server accepts a submission.
-        response = await getExamApi().startExam(session.token, examId, examToken || undefined);
+        const started: StartExamResponse = await getExamApi().startExam(session.token, examId, examToken || undefined);
+        activeAttempt = started.attempt;
         latestAnswersRef.current = {};
         lockedAtRef.current = undefined;
         deadlineLockedRef.current = false;
-        latestRevisionRef.current = response.attempt.revision;
+        latestRevisionRef.current = activeAttempt.revision;
         changeVersionRef.current = 0;
         savedVersionRef.current = 0;
         setDirtyCount(0); setSaveStatus('synced');
-        setAttempt(response.attempt); mergeQuestions(response.initialQuestions); setAnswers({}); setFlagged([]); setCurrentIndex(0); setRevision(response.attempt.revision);
+        setAttempt(activeAttempt); mergeQuestions(started.initialQuestions); setAnswers({}); setFlagged([]); setCurrentIndex(0); setRevision(activeAttempt.revision);
       }
       submissionIdRef.current = null;
-      const activeAttempt = response.attempt;
+      // Both branches initialize activeAttempt with the matching typed response.
       setAttemptPaused(activeAttempt.status === 'PAUSED');
       const expiresAtMs = new Date(activeAttempt.expiresAt).getTime();
       const serverTimeMs = new Date(activeAttempt.serverTime).getTime();
