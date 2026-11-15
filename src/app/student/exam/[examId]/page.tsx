@@ -11,7 +11,7 @@ import { Badge, Modal } from '@/components/ui';
 import { MathHtml, ZoomableImage } from '@/components/math-html';
 import { QuestionStimulus } from '@/components/question-stimulus';
 import { useSession } from '@/contexts/session-context';
-import { getExamApi, type Attempt, type ExamResult, type ExamSummary, type PreflightResult, type Question, type SaveStatus, type SaveAnswersResponse, type SubmitResponse } from '@/lib/api';
+import { getExamApi, type Attempt, type ExamResult, type ExamSummary, type PreflightResult, type Question, type SaveStatus, type SaveAnswersResponse, type SubmitResponse, type StartExamResponse, type ResumeAttemptResponse } from '@/lib/api';
 import { checkStorageReadiness, deleteLocalAttempt, findLocalAttemptByExam, saveLocalAttempt } from '@/lib/exam-store';
 import { differingAnswerIds } from '@/lib/answer-sync';
 import { formatBytes, formatCountdown, formatDateTime, formatDuration } from '@/lib/format';
@@ -340,7 +340,7 @@ export default function ExamPage() {
     if (!navigator.onLine && !['IN_PROGRESS', 'PAUSED'].includes(String(summary.attemptStatus || ''))) { setError('Koneksi internet diperlukan untuk memulai attempt baru.'); return; }
     setError(''); setRemainingMs(null); autoSubmitStarted.current = false; setPhase('starting');
     try {
-      let response;
+      let response: StartExamResponse | ResumeAttemptResponse;
       const local = await findLocalAttemptByExam(examId, summary.attemptId);
       if (summary.attemptStatus === 'SUBMITTED' && summary.attemptId) {
         const restored = await getExamApi().resumeAttempt(session.token, summary.attemptId, 0, 1);
